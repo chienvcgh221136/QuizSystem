@@ -1,0 +1,18 @@
+# Build results
+bin/
+obj/
+
+# Environment variables (sensitive data)
+.env
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
