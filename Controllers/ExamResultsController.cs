@@ -22,38 +22,31 @@ namespace QuizApi.Controllers
             _context = context;
         }
 
-        // ============================================================
-        // BƯỚC 1: User bắt đầu làm bài thi
-        // POST /api/ExamResults/start
-        // ============================================================
         [HttpPost("start")]
         public async Task<IActionResult> StartExam([FromBody] StartExamRequest request)
         {
             try
             {
-                // Lấy UserId từ JWT Token
                 var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
                 if (userIdClaim == null) return Unauthorized();
                 int userId = int.Parse(userIdClaim);
-
-                // Kiểm tra đề thi tồn tại và đang Published
-                var exam = await _context.Exams.FirstOrDefaultAsync(e => e.ExamId == request.ExamId && e.Status == "Published");
+                var exam = await _context.Exams.FindAsync(request.ExamId);
                 if (exam == null)
-                    return NotFound(new { message = "Không tìm thấy đề thi hoặc đề chưa được công bố." });
-
-                // Kiểm tra user đã bắt đầu làm đề này chưa (chưa nộp)
+                    return NotFound(new { message = "Không tìm thấy đề thi." });
+                bool isAdmin = User.IsInRole("Admin");
+                if (!isAdmin && exam.Status != "Published")
+                    return BadRequest(new { message = "Đề thi này chưa được công bố." });
                 var existing = await _context.ExamResults.FirstOrDefaultAsync(
-                    r => r.ExamId == request.ExamId && r.UserId == userId && r.Status == "InProgress");
+                    r => r.ExamId == request.ExamId && r.UserId == userId && r.Status == "In_Progress");
                 if (existing != null)
                     return Ok(new { message = "Bạn đang làm dở bài này.", resultId = existing.ResultId });
 
-                // Tạo bản ghi kết quả mới
                 var result = new ExamResult
                 {
                     ExamId = request.ExamId,
                     UserId = userId,
                     StartTime = DateTime.Now,
-                    Status = "InProgress"
+                    Status = "In_Progress"
                 };
 
                 _context.ExamResults.Add(result);
@@ -73,10 +66,6 @@ namespace QuizApi.Controllers
             }
         }
 
-        // ============================================================
-        // BƯỚC 2: User nộp bài + Chấm điểm tự động
-        // POST /api/ExamResults/{resultId}/submit
-        // ============================================================
         [HttpPost("{resultId}/submit")]
         public async Task<IActionResult> SubmitExam(int resultId, [FromBody] SubmitExamRequest request)
         {
@@ -86,45 +75,56 @@ namespace QuizApi.Controllers
                 if (userIdClaim == null) return Unauthorized();
                 int userId = int.Parse(userIdClaim);
 
-                // Kiểm tra bản ghi kết quả
                 var result = await _context.ExamResults.FirstOrDefaultAsync(
-                    r => r.ResultId == resultId && r.UserId == userId && r.Status == "InProgress");
+                    r => r.ResultId == resultId && r.UserId == userId && r.Status == "In_Progress");
                 if (result == null)
                     return NotFound(new { message = "Không tìm thấy bài thi đang làm." });
+
+                // 1. Lấy danh sách ID các câu hỏi thực sự thuộc về đề thi này
+                var examQuestions = await _context.ExamQuestions
+                    .Where(eq => eq.ExamId == result.ExamId)
+                    .Select(eq => eq.QuestionId)
+                    .ToListAsync();
 
                 double totalScore = 0;
                 var userAnswers = new List<UserAnswer>();
 
-                // Chấm từng câu trả lời
-                foreach (var answer in request.Answers)
+                // 2. Chỉ xử lý các câu trả lời nằm trong danh sách câu hỏi của đề
+                foreach (var questionId in examQuestions)
                 {
-                    var question = await _context.QuestionBank.FindAsync(answer.QuestionId);
+                    var answer = request.Answers.FirstOrDefault(a => a.QuestionId == questionId);
+                    var question = await _context.QuestionBank.FindAsync(questionId);
+                    
                     if (question == null) continue;
 
-                    bool isCorrect = question.CorrectOption?.ToUpper() == answer.SelectedOption?.ToUpper();
-                    if (isCorrect) totalScore += question.ScorePerQuestion;
+                    bool isCorrect = false;
+                    string? selectedOption = null;
+
+                    if (answer != null)
+                    {
+                        selectedOption = answer.SelectedOption;
+                        isCorrect = question.CorrectOption?.ToUpper() == selectedOption?.ToUpper();
+                        if (isCorrect) totalScore += question.ScorePerQuestion;
+                    }
 
                     userAnswers.Add(new UserAnswer
                     {
                         ResultId = resultId,
-                        QuestionId = answer.QuestionId,
-                        SelectedOption = answer.SelectedOption,
+                        QuestionId = questionId,
+                        SelectedOption = selectedOption,
                         IsCorrect = isCorrect,
                         AnsweredAt = DateTime.Now
                     });
                 }
 
-                // Lưu tất cả câu trả lời
                 _context.UserAnswers.AddRange(userAnswers);
 
-                // Cập nhật kết quả
                 result.Score = Math.Round(totalScore, 2);
                 result.SubmitTime = DateTime.Now;
                 result.Status = "Submitted";
 
                 await _context.SaveChangesAsync();
 
-                // Lấy tổng điểm tối đa của đề thi
                 var exam = await _context.Exams.FindAsync(result.ExamId);
 
                 return Ok(new
@@ -145,10 +145,6 @@ namespace QuizApi.Controllers
             }
         }
 
-        // ============================================================
-        // BƯỚC 3: User xem kết quả chi tiết
-        // GET /api/ExamResults/{resultId}
-        // ============================================================
         [HttpGet("{resultId}")]
         public async Task<IActionResult> GetResult(int resultId)
         {
@@ -165,7 +161,7 @@ namespace QuizApi.Controllers
 
                 var exam = await _context.Exams.FindAsync(result.ExamId);
 
-                // Lấy câu trả lời kèm đáp án đúng để review
+
                 var answers = await (from ua in _context.UserAnswers
                                      join q in _context.QuestionBank on ua.QuestionId equals q.QuestionId
                                      where ua.ResultId == resultId
@@ -179,7 +175,7 @@ namespace QuizApi.Controllers
                                          q.OptionC,
                                          q.OptionD,
                                          ua.SelectedOption,
-                                         CorrectOption = q.CorrectOption, // Hiện đáp án đúng khi xem lại
+                                         CorrectOption = q.CorrectOption,
                                          ua.IsCorrect,
                                          q.ScorePerQuestion
                                      }).ToListAsync();
@@ -211,7 +207,7 @@ namespace QuizApi.Controllers
             }
         }
 
-        // Lấy lịch sử làm bài của user
+    
         [HttpGet("my-history")]
         public async Task<IActionResult> GetMyHistory()
         {
@@ -226,6 +222,7 @@ namespace QuizApi.Controllers
                                  select new
                                  {
                                      r.ResultId,
+                                     e.ExamId,
                                      e.Title,
                                      e.Category,
                                      r.Score,
@@ -239,7 +236,7 @@ namespace QuizApi.Controllers
         }
     }
 
-    // ===== Request Models =====
+
     public class StartExamRequest
     {
         public int ExamId { get; set; }

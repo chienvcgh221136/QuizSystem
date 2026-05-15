@@ -14,6 +14,7 @@ namespace QuizApi.Models
         public DbSet<User> Users { get; set; }
         public DbSet<ExamResult> ExamResults { get; set; }
         public DbSet<UserAnswer> UserAnswers { get; set; }
+        public DbSet<ChatMessage> ChatMessages { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {

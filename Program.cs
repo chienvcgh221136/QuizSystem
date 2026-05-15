@@ -9,6 +9,16 @@ var builder = WebApplication.CreateBuilder(args);
 
 DotNetEnv.Env.Load();
 
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("QuizChatPolicy", policy =>
+    {
+        policy.WithOrigins("http://localhost:5173", "http://localhost:5174")
+              .AllowAnyMethod()
+              .AllowAnyHeader();
+    });
+});
+
 builder.Services.AddControllers();
 builder.Services.AddSwaggerGen(c =>
 {
@@ -56,7 +66,7 @@ builder.Services.AddDbContext<QuizDbContext>(options =>
     options.UseSqlServer(Environment.GetEnvironmentVariable("DB_CONNECTION_STRING") ?? builder.Configuration.GetConnectionString("DefaultConnection")));
 
 builder.Services.AddHttpClient();
-builder.Services.AddScoped<QuizApi.Services.GeminiService>();
+builder.Services.AddScoped<QuizApi.Services.GroqService>();
 
 var app = builder.Build();
 
@@ -66,11 +76,39 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
+
+app.UseCors("QuizChatPolicy");
 
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+
+using (var scope = app.Services.CreateScope())
+{
+    var context = scope.ServiceProvider.GetRequiredService<QuizDbContext>();
+    try {
+        context.Database.ExecuteSqlRaw(@"
+            IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[ChatMessages]') AND type in (N'U'))
+            BEGIN
+                CREATE TABLE [dbo].[ChatMessages] (
+                    [MessageId] INT IDENTITY(1,1) NOT NULL,
+                    [Username] NVARCHAR(MAX) NOT NULL,
+                    [UserMessage] NVARCHAR(MAX) NOT NULL,
+                    [AiResponse] NVARCHAR(MAX) NOT NULL,
+                    [SentAt] DATETIME2 NOT NULL DEFAULT (GETDATE()),
+                    [Metadata] NVARCHAR(MAX) NULL,
+                    CONSTRAINT [PK_ChatMessages] PRIMARY KEY CLUSTERED ([MessageId] ASC)
+                );
+            END
+        ");
+    } catch (Exception ex) {
+        Console.WriteLine($"[Database Init] Error creating ChatMessages table: {ex.Message}");
+    }
+}
 
 app.Run();

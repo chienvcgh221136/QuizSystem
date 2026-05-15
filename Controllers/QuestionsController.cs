@@ -38,6 +38,25 @@ namespace QuizApi.Controllers
             }
         }
 
+        [HttpGet("categories")]
+        public async Task<IActionResult> GetCategories()
+        {
+            try
+            {
+                var categories = await _context.QuestionBank
+                    .Where(q => !string.IsNullOrEmpty(q.Category))
+                    .Select(q => q.Category)
+                    .Distinct()
+                    .ToListAsync();
+
+                return Ok(categories);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Lỗi khi lấy danh sách danh mục.", error = ex.Message });
+            }
+        }
+
         [HttpGet("random")]
         public async Task<IActionResult> GetRandomQuestions([FromQuery] string category, [FromQuery] string level)
         {
@@ -79,13 +98,15 @@ namespace QuizApi.Controllers
                     return BadRequest(new { message = "Dữ liệu câu hỏi không hợp lệ." });
                 }
 
+                newQuestion.CreatedAt = DateTime.Now;
                 await _context.QuestionBank.AddAsync(newQuestion);
                 await _context.SaveChangesAsync();
 
-                return CreatedAtAction(nameof(GetAllQuestions), new { id = newQuestion.QuestionId }, newQuestion);
+                return Ok(new { message = "Thêm mới câu hỏi thành công.", data = newQuestion });
             }
             catch (Exception ex)
             {
+                Console.WriteLine("ERROR CREATE QUESTION: " + ex.ToString());
                 var innerMsg = ex.InnerException != null ? ex.InnerException.Message : "";
                 return StatusCode(500, new { message = "Lỗi hệ thống khi thêm mới câu hỏi.", error = ex.Message, innerError = innerMsg });
             }
@@ -115,6 +136,7 @@ namespace QuizApi.Controllers
                 existingQuestion.OptionC = updatedQuestion.OptionC;
                 existingQuestion.OptionD = updatedQuestion.OptionD;
                 existingQuestion.CorrectOption = updatedQuestion.CorrectOption;
+                existingQuestion.Explanation = updatedQuestion.Explanation;
                 existingQuestion.ScorePerQuestion = updatedQuestion.ScorePerQuestion;
                 existingQuestion.IsActive = updatedQuestion.IsActive;
 
@@ -125,6 +147,7 @@ namespace QuizApi.Controllers
             }
             catch (Exception ex)
             {
+                Console.WriteLine("ERROR UPDATE QUESTION: " + ex.ToString());
                 var innerMsg = ex.InnerException != null ? ex.InnerException.Message : "";
                 return StatusCode(500, new { message = "Lỗi hệ thống khi cập nhật câu hỏi.", error = ex.Message, innerError = innerMsg });
             }
