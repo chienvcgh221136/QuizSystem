@@ -49,7 +49,15 @@ namespace QuizApi.Controllers
         {
             try
             {
-                var exams = await _context.Exams.AsNoTracking().ToListAsync();
+                var query = _context.Exams.AsNoTracking();
+                
+                // Nếu không phải Admin, chỉ trả về đề thi có status là "Published"
+                if (!User.IsInRole("Admin"))
+                {
+                    query = query.Where(e => e.Status == "Published");
+                }
+                
+                var exams = await query.ToListAsync();
                 return Ok(exams);
             }
             catch (Exception ex)
@@ -68,6 +76,13 @@ namespace QuizApi.Controllers
                 {
                     return NotFound(new { message = "Không tìm thấy đề thi." });
                 }
+
+                // Nếu đề thi chưa công bố và người dùng không phải Admin thì chặn
+                if (exam.Status != "Published" && !User.IsInRole("Admin"))
+                {
+                    return BadRequest(new { message = "Đề thi này chưa được công bố." });
+                }
+
                 return Ok(exam);
             }
             catch (Exception ex)
@@ -86,6 +101,13 @@ namespace QuizApi.Controllers
                 if (exam == null)
                 {
                     return NotFound(new { message = "Không tìm thấy đề thi." });
+                }
+
+                // Nếu đề thi chưa công bố và người dùng không phải Admin thì chặn
+                bool isAdmin = User.Identity?.IsAuthenticated == true && User.IsInRole("Admin");
+                if (exam.Status != "Published" && !isAdmin)
+                {
+                    return BadRequest(new { message = "Đề thi này chưa được công bố." });
                 }
 
                 var questions = await (from eq in _context.ExamQuestions
