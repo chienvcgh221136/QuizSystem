@@ -187,6 +187,21 @@ namespace QuizApi.Controllers
                     await _context.SaveChangesAsync();
                 }
 
+                if (newExam.Status == "Published")
+                {
+                    var notification = new Notification
+                    {
+                        Title = "Đề thi mới xuất bản",
+                        Message = $"Đề thi \"{newExam.Title}\" ({newExam.Category} - {newExam.Level}) đã được đăng tải. Thử sức ngay!",
+                        Type = "Exam",
+                        TargetId = newExam.ExamId,
+                        IsRead = false,
+                        CreatedAt = DateTime.Now
+                    };
+                    await _context.Notifications.AddAsync(notification);
+                    await _context.SaveChangesAsync();
+                }
+
                 return CreatedAtAction(nameof(GetExamById), new { id = newExam.ExamId }, newExam);
             }
             catch (Exception ex)
@@ -288,6 +303,9 @@ namespace QuizApi.Controllers
                     return NotFound(new { message = "Không tìm thấy đề thi." });
                 }
 
+                bool wasPublished = existingExam.Status == "Published";
+                bool isPublished = updatedExam.Status == "Published";
+
                 existingExam.Title = updatedExam.Title;
                 existingExam.Description = updatedExam.Description;
                 existingExam.Category = updatedExam.Category;
@@ -300,6 +318,21 @@ namespace QuizApi.Controllers
 
                 _context.Exams.Update(existingExam);
                 await _context.SaveChangesAsync();
+
+                if (!wasPublished && isPublished)
+                {
+                    var notification = new Notification
+                    {
+                        Title = "Đề thi mới xuất bản",
+                        Message = $"Đề thi \"{existingExam.Title}\" ({existingExam.Category} - {existingExam.Level}) đã được đăng tải. Thử sức ngay!",
+                        Type = "Exam",
+                        TargetId = existingExam.ExamId,
+                        IsRead = false,
+                        CreatedAt = DateTime.Now
+                    };
+                    await _context.Notifications.AddAsync(notification);
+                    await _context.SaveChangesAsync();
+                }
 
                 return Ok(new { message = "Cập nhật đề thi thành công.", data = existingExam });
             }
@@ -403,6 +436,22 @@ namespace QuizApi.Controllers
                 }
 
                 await _context.SaveChangesAsync();
+
+                if (newExam.Status == "Published")
+                {
+                    var notification = new Notification
+                    {
+                        Title = "Đề thi mới xuất bản",
+                        Message = $"Đề thi \"{newExam.Title}\" ({newExam.Category} - {newExam.Level}) đã được đăng tải. Thử sức ngay!",
+                        Type = "Exam",
+                        TargetId = newExam.ExamId,
+                        IsRead = false,
+                        CreatedAt = DateTime.Now
+                    };
+                    await _context.Notifications.AddAsync(notification);
+                    await _context.SaveChangesAsync();
+                }
+
                 await transaction.CommitAsync();
 
                 return Ok(new { message = "Đã lưu bộ đề thi thành công!", examId = newExam.ExamId });

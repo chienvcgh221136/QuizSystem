@@ -106,8 +106,43 @@ using (var scope = app.Services.CreateScope())
                 );
             END
         ");
+
+        context.Database.ExecuteSqlRaw(@"
+            IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[Notifications]') AND type in (N'U'))
+            BEGIN
+                CREATE TABLE [dbo].[Notifications] (
+                    [NotificationId] INT IDENTITY(1,1) NOT NULL,
+                    [Title] NVARCHAR(MAX) NOT NULL,
+                    [Message] NVARCHAR(MAX) NOT NULL,
+                    [Type] NVARCHAR(50) NOT NULL DEFAULT ('Exam'),
+                    [TargetId] INT NULL,
+                    [IsRead] BIT NOT NULL DEFAULT (0),
+                    [CreatedAt] DATETIME2 NOT NULL DEFAULT (GETDATE()),
+                    [UserId] INT NULL,
+                    CONSTRAINT [PK_Notifications] PRIMARY KEY CLUSTERED ([NotificationId] ASC)
+                );
+            END
+        ");
+
+        context.Database.ExecuteSqlRaw(@"
+            IF EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[Notifications]') AND type in (N'U'))
+            BEGIN
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Notifications]') AND name = 'UserId')
+                BEGIN
+                    ALTER TABLE [dbo].[Notifications] ADD [UserId] INT NULL;
+                END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Notifications]') AND name = 'Type')
+                BEGIN
+                    ALTER TABLE [dbo].[Notifications] ADD [Type] NVARCHAR(50) NOT NULL DEFAULT ('Exam');
+                END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Notifications]') AND name = 'TargetId')
+                BEGIN
+                    ALTER TABLE [dbo].[Notifications] ADD [TargetId] INT NULL;
+                END
+            END
+        ");
     } catch (Exception ex) {
-        Console.WriteLine($"[Database Init] Error creating ChatMessages table: {ex.Message}");
+        Console.WriteLine($"[Database Init] Error creating or altering database tables: {ex.Message}");
     }
 }
 

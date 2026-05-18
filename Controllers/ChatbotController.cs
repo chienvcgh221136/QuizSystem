@@ -383,6 +383,21 @@ If chatting:
             _context.Exams.Add(newExam);
             await _context.SaveChangesAsync();
 
+            if (newExam.Status == "Published")
+            {
+                var notification = new Notification
+                {
+                    Title = "Đề thi mới xuất bản",
+                    Message = $"Đề thi \"{newExam.Title}\" ({newExam.Category} - {newExam.Level}) đã được đăng tải. Thử sức ngay!",
+                    Type = "Exam",
+                    TargetId = newExam.ExamId,
+                    IsRead = false,
+                    CreatedAt = DateTime.Now
+                };
+                await _context.Notifications.AddAsync(notification);
+                await _context.SaveChangesAsync();
+            }
+
             for (int i = 0; i < randomQuestions.Count; i++)
             {
                 var eq = new ExamQuestion
