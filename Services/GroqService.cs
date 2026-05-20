@@ -19,7 +19,12 @@ namespace QuizApi.Services
         {
             _httpClient = httpClient;
             _apiKey = Environment.GetEnvironmentVariable("GROQ_API_KEY") ?? configuration["GroqSettings:ApiKey"]!;
-            _model = Environment.GetEnvironmentVariable("GROQ_MODEL") ?? "llama-3.3-70b-versatile";
+            _model = Environment.GetEnvironmentVariable("GROQ_MODEL") ?? configuration["GroqSettings:Model"] ?? "llama-3.3-70b-versatile";
+            
+            if (string.IsNullOrEmpty(_apiKey))
+            {
+                throw new InvalidOperationException("GROQ_API_KEY environment variable hoặc GroqSettings:ApiKey trong appsettings.json chưa được cấu hình!");
+            }
         }
 
         public async Task<string> ChatAsync(string userMessage)

@@ -5,7 +5,7 @@ using QuizApi.Models;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-
+using BCrypt.Net;
 namespace QuizApi.Controllers
 {
     [Route("api/[controller]")]
@@ -59,7 +59,8 @@ namespace QuizApi.Controllers
             if (await _context.Users.AnyAsync(u => u.Username == user.Username))
                 return BadRequest(new { message = "Username already exists" });
 
-            if (string.IsNullOrEmpty(user.PasswordHash)) user.PasswordHash = "123456"; // Default password
+            string rawPassWord= string.IsNullOrEmpty(user.PasswordHash) ? "123456" : user.PasswordHash;
+            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(rawPassWord);
             
             user.CreatedAt = System.DateTime.Now;
             _context.Users.Add(user);
@@ -79,8 +80,8 @@ namespace QuizApi.Controllers
             existing.FullName = user.FullName;
             existing.Email = user.Email;
             existing.Role = user.Role;
-            if (!string.IsNullOrEmpty(user.PasswordHash)) existing.PasswordHash = user.PasswordHash;
-
+            if(!string.IsNullOrEmpty(user.PasswordHash))
+                existing.PasswordHash = BCrypt.Net.BCrypt.HashPassword(user.PasswordHash);
             try { await _context.SaveChangesAsync(); }
             catch (DbUpdateConcurrencyException) { if (!UserExists(id)) return NotFound(); else throw; }
 
