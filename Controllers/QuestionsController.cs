@@ -26,11 +26,32 @@ namespace QuizApi.Controllers
             try
             {
                 var questions = await _context.QuestionBank
-                    .Where(q => q.IsActive == true) 
+                    .Where(q => q.IsActive == true)
                     .AsNoTracking()
                     .ToListAsync();
 
-                return Ok(questions);
+                // Normalize certain category names for UI consistency
+                var categoryMap = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+                {
+                    { "Math", "Toán" }
+                };
+
+                var projected = questions.Select(q => new {
+                    questionId = q.QuestionId,
+                    content = q.Content,
+                    category = categoryMap.ContainsKey(q.Category ?? "") ? categoryMap[q.Category ?? ""] : q.Category,
+                    level = q.Level,
+                    optionA = q.OptionA,
+                    optionB = q.OptionB,
+                    optionC = q.OptionC,
+                    optionD = q.OptionD,
+                    correctOption = q.CorrectOption,
+                    explanation = q.Explanation,
+                    scorePerQuestion = q.ScorePerQuestion,
+                    isActive = q.IsActive
+                }).ToList();
+
+                return Ok(projected);
             }
             catch (Exception ex)
             {
@@ -49,7 +70,15 @@ namespace QuizApi.Controllers
                     .Distinct()
                     .ToListAsync();
 
-                return Ok(categories);
+                // Normalize known category names
+                var categoryMap = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+                {
+                    { "Math", "Toán" }
+                };
+
+                var normalized = categories.Select(c => categoryMap.ContainsKey(c) ? categoryMap[c] : c).ToList();
+
+                return Ok(normalized);
             }
             catch (Exception ex)
             {

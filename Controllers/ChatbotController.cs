@@ -6,6 +6,7 @@ using QuizApi.Services;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -19,6 +20,22 @@ namespace QuizApi.Controllers
     {
         private readonly GroqService _groqService;
         private readonly QuizDbContext _context;
+
+        private static readonly Dictionary<string, string[]> CategoryAliases = new(StringComparer.OrdinalIgnoreCase)
+        {
+            { "C#",         new[] { "c#", "csharp", "c sharp", "dotnet", ".net" } },
+            { "IT",         new[] { "công nghệ thông tin", "cntt", "information technology" } },
+            { "SQL Server", new[] { "sql", "sql server", "database", "db", "t-sql", "tsql" } },
+            { "ASP.NET",    new[] { "asp.net", "aspnet", "asp net" } },
+            { "Toán",       new[] { "toán", "math", "toán học", "mathematics" } },
+        };
+
+        private static readonly Dictionary<string, string[]> LevelAliases = new(StringComparer.OrdinalIgnoreCase)
+        {
+            { "Sơ cấp", new[] { "sơ cấp", "so cap", "dễ", "de", "cơ bản", "co ban", "elementary", "easy", "beginner", "basic" } },
+            { "Trung cấp", new[] { "trung cấp", "trung cap", "trung bình", "trung binh", "intermediate", "medium" } },
+            { "Cao cấp", new[] { "cao cấp", "cao cap", "khó", "kho", "advanced", "hard" } },
+        };
 
         public ChatbotController(GroqService groqService, QuizDbContext context)
         {
@@ -193,6 +210,120 @@ namespace QuizApi.Controllers
             return null;
         }
 
+        private static string NormalizeForMatch(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+
+            string formD = value.Trim().ToLowerInvariant().Normalize(NormalizationForm.FormD);
+            var sb = new StringBuilder(formD.Length);
+
+            foreach (char ch in formD)
+            {
+                var uc = CharUnicodeInfo.GetUnicodeCategory(ch);
+                if (uc == UnicodeCategory.NonSpacingMark)
+                {
+                    continue;
+                }
+
+                if (char.IsLetterOrDigit(ch) || char.IsWhiteSpace(ch))
+                {
+                    sb.Append(ch);
+                }
+                else
+                {
+                    sb.Append(' ');
+                }
+            }
+
+            var collapsed = System.Text.RegularExpressions.Regex.Replace(sb.ToString(), @"\s+", " ").Trim();
+            return collapsed;
+        }
+
+        private static IReadOnlyList<string> GetCategoryTerms(string category)
+        {
+            var normalizedCategory = NormalizeForMatch(category);
+            if (string.IsNullOrEmpty(normalizedCategory)) return Array.Empty<string>();
+
+            foreach (var kv in CategoryAliases)
+            {
+                var canonicalNormalized = NormalizeForMatch(kv.Key);
+                var aliasNormalized = kv.Value.Select(NormalizeForMatch).Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+
+                if (normalizedCategory == canonicalNormalized || aliasNormalized.Any(a => normalizedCategory.Contains(a, StringComparison.Ordinal)))
+                {
+                    var terms = new HashSet<string>(StringComparer.Ordinal)
+                    {
+                        canonicalNormalized,
+                        normalizedCategory
+                    };
+                    foreach (var alias in aliasNormalized)
+                    {
+                        terms.Add(alias);
+                    }
+                    return terms.ToList();
+                }
+            }
+
+            return new[] { normalizedCategory };
+        }
+
+        private static bool IsCategoryMatch(string dbCategory, string requestedCategory)
+        {
+            var dbNorm = NormalizeForMatch(dbCategory);
+            if (string.IsNullOrEmpty(dbNorm)) return false;
+
+            var terms = GetCategoryTerms(requestedCategory);
+            if (terms.Count == 0) return true;
+
+            foreach (var term in terms)
+            {
+                if (string.IsNullOrEmpty(term)) continue;
+                if (dbNorm.Equals(term, StringComparison.Ordinal) || dbNorm.Contains(term, StringComparison.Ordinal) || term.Contains(dbNorm, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static string CanonicalizeLevel(string level)
+        {
+            var normalizedLevel = NormalizeForMatch(level);
+            foreach (var kv in LevelAliases)
+            {
+                var canonicalNorm = NormalizeForMatch(kv.Key);
+                if (normalizedLevel == canonicalNorm || kv.Value.Select(NormalizeForMatch).Any(alias => normalizedLevel.Contains(alias, StringComparison.Ordinal)))
+                {
+                    return kv.Key;
+                }
+            }
+
+            return "Trung cấp";
+        }
+
+        private static bool IsLevelMatch(string dbLevel, string requestedLevel)
+        {
+            var dbNorm = NormalizeForMatch(dbLevel);
+            if (string.IsNullOrEmpty(dbNorm)) return false;
+
+            var canonicalRequested = CanonicalizeLevel(requestedLevel);
+            var allowedTerms = new HashSet<string>(StringComparer.Ordinal)
+            {
+                NormalizeForMatch(canonicalRequested)
+            };
+
+            if (LevelAliases.TryGetValue(canonicalRequested, out var aliases))
+            {
+                foreach (var alias in aliases)
+                {
+                    allowedTerms.Add(NormalizeForMatch(alias));
+                }
+            }
+
+            return allowedTerms.Any(term => !string.IsNullOrEmpty(term) && (dbNorm.Equals(term, StringComparison.Ordinal) || dbNorm.Contains(term, StringComparison.Ordinal) || term.Contains(dbNorm, StringComparison.Ordinal)));
+        }
+
         private static (int? TargetTotal, int? AdditionalCount, bool IsIncreaseRequest) ParseQuestionCountRequest(string message)
         {
             var lower = message.ToLowerInvariant();
@@ -236,15 +367,109 @@ namespace QuizApi.Controllers
             return (null, null, false);
         }
 
-        private async Task<List<Dictionary<string, object>>> BuildRandomQuestionItems(string category, int count)
+        private static string NormalizeAnswerChoice(string? rawAnswer, List<string> options)
         {
-            var questions = await _context.QuestionBank
-                .Where(q => q.Category == category && q.IsActive == true)
-                .OrderBy(q => Guid.NewGuid())
-                .Take(count)
+            var normalized = (rawAnswer ?? "A").Trim().ToUpperInvariant();
+            if (normalized.Length == 1 && "ABCD".Contains(normalized))
+            {
+                return normalized;
+            }
+
+            if (options.Count > 0 && (normalized.Contains(options[0].ToUpperInvariant(), StringComparison.Ordinal) || normalized == options[0].ToUpperInvariant())) return "A";
+            if (options.Count > 1 && (normalized.Contains(options[1].ToUpperInvariant(), StringComparison.Ordinal) || normalized == options[1].ToUpperInvariant())) return "B";
+            if (options.Count > 2 && (normalized.Contains(options[2].ToUpperInvariant(), StringComparison.Ordinal) || normalized == options[2].ToUpperInvariant())) return "C";
+            if (options.Count > 3 && (normalized.Contains(options[3].ToUpperInvariant(), StringComparison.Ordinal) || normalized == options[3].ToUpperInvariant())) return "D";
+
+            if (normalized.StartsWith("A", StringComparison.Ordinal) || normalized.StartsWith("OPTION A", StringComparison.Ordinal)) return "A";
+            if (normalized.StartsWith("B", StringComparison.Ordinal) || normalized.StartsWith("OPTION B", StringComparison.Ordinal)) return "B";
+            if (normalized.StartsWith("C", StringComparison.Ordinal) || normalized.StartsWith("OPTION C", StringComparison.Ordinal)) return "C";
+            if (normalized.StartsWith("D", StringComparison.Ordinal) || normalized.StartsWith("OPTION D", StringComparison.Ordinal)) return "D";
+
+            return "A";
+        }
+
+        private static Dictionary<string, object> BuildQuestionItem(string text, string type, List<string> options, string answer, int? questionIndex = null)
+        {
+            var item = new Dictionary<string, object>
+            {
+                ["text"] = text,
+                ["type"] = type,
+                ["options"] = options,
+                ["answer"] = NormalizeAnswerChoice(answer, options)
+            };
+
+            if (questionIndex.HasValue)
+            {
+                item["questionIndex"] = questionIndex.Value;
+            }
+
+            return item;
+        }
+
+        private static bool TryParseQuestionItem(JsonElement element, out Dictionary<string, object>? questionItem, bool includeQuestionIndex = false)
+        {
+            questionItem = null;
+
+            var qText = element.TryGetProperty("text", out var qt) ? qt.GetString() ?? string.Empty : string.Empty;
+            if (string.IsNullOrWhiteSpace(qText))
+            {
+                return false;
+            }
+
+            var qType = element.TryGetProperty("type", out var qtyp) ? qtyp.GetString() ?? "Multiple Choice" : "Multiple Choice";
+            var optionsList = new List<string>();
+
+            if (element.TryGetProperty("options", out var opts) && opts.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var opt in opts.EnumerateArray())
+                {
+                    optionsList.Add(opt.GetString() ?? string.Empty);
+                }
+            }
+
+            var rawAnswer = element.TryGetProperty("answer", out var qans) ? qans.GetString() ?? "A" : "A";
+            int? questionIndex = null;
+            if (includeQuestionIndex && element.TryGetProperty("questionIndex", out var qIndexProp) && qIndexProp.ValueKind == JsonValueKind.Number && qIndexProp.TryGetInt32(out var parsedIndex))
+            {
+                questionIndex = parsedIndex;
+            }
+
+            questionItem = BuildQuestionItem(qText, qType, optionsList, rawAnswer, questionIndex);
+            return true;
+        }
+
+        private static Dictionary<string, object> BuildQuestionItemFromStoredJson(JsonElement element)
+        {
+            var text = element.TryGetProperty("text", out var pt) ? pt.GetString() ?? string.Empty : string.Empty;
+            var type = element.TryGetProperty("type", out var ptype) ? ptype.GetString() ?? "Multiple Choice" : "Multiple Choice";
+            var options = element.TryGetProperty("options", out var popts) && popts.ValueKind == JsonValueKind.Array
+                ? popts.EnumerateArray().Select(x => x.GetString() ?? string.Empty).ToList()
+                : new List<string>();
+            var answer = element.TryGetProperty("answer", out var pans) ? pans.GetString() ?? "A" : "A";
+
+            return BuildQuestionItem(text, type, options, answer);
+        }
+
+        private async Task<List<QuestionBank>> GetMatchedActiveQuestions(string category, string level)
+        {
+            var canonicalLevel = CanonicalizeLevel(level);
+            var availableQuestions = await _context.QuestionBank
+                .Where(q => q.IsActive == true)
                 .ToListAsync();
 
-            return questions.Select(q => new Dictionary<string, object>
+            return availableQuestions
+                .Where(q => IsCategoryMatch(q.Category, category) && IsLevelMatch(q.Level, canonicalLevel))
+                .ToList();
+        }
+
+        private async Task<List<Dictionary<string, object>>> BuildRandomQuestionItems(string category, string level, int count)
+        {
+            var matched = (await GetMatchedActiveQuestions(category, level))
+                .OrderBy(q => Guid.NewGuid())
+                .Take(count)
+                .ToList();
+
+            return matched.Select(q => new Dictionary<string, object>
             {
                 ["text"] = q.Content,
                 ["type"] = "Multiple Choice",
@@ -310,6 +535,20 @@ namespace QuizApi.Controllers
                 }
             }
             string? compactPreviousExamContext = BuildCompactPreviousExamContext(previousExamMetadata, requestedQuestionIndexes);
+            // If the user explicitly requested to "tạo đề" / create an exam, use DB-only flow and do not call AI.
+            if (isExamRequest)
+            {
+                var (categoryLocal, countLocal, levelLocal) = ParseExamIntentLocally(request.Message);
+                if (string.IsNullOrEmpty(categoryLocal))
+                {
+                    categoryLocal = await _context.QuestionBank
+                        .Select(q => q.Category)
+                        .FirstOrDefaultAsync() ?? "Chung";
+                }
+
+                return await HandleCreateExam(categoryLocal, levelLocal, countLocal, countLocal);
+            }
+
             string systemPrompt = $@"You are the 'QuizChat Local AI Tutor'.
 CURRENT DATABASE STATS: {dbStats}
 
@@ -321,6 +560,11 @@ STRICT RULES:
 5. ALWAYS respond with valid JSON. Do not include any text outside the JSON.
 6. EXAM JSON RULE: For each question, the ""answer"" field MUST be exactly one character: ""A"", ""B"", ""C"", or ""D"". DO NOT put the full text of the answer in the ""answer"" field.
 7. EXAM LEVEL RULE: You must determine the difficulty level requested by the user (""Sơ cấp"" for basic/elementary, ""Trung cấp"" for intermediate, ""Cao cấp"" for advanced) and include it in the ""level"" property of the JSON. If not specified, default to ""Trung cấp"".
+7a. EXAMPLE LEVEL GUIDELINES: Use the examples below to match the tone and difficulty of generated questions. STRICTLY follow these styles when generating questions for each level.
+    - Sơ cấp (Easy): short, direct questions testing basic facts or simple calculations. Example: ""Tìm x: 2x + 5 = 11"" with simple numeric options.
+    - Trung cấp (Intermediate): multi-step problems or applied knowledge requiring short reasoning. Example: ""Cho tam giác vuông có hai cạnh góc vuông 3cm và 4cm. Tìm độ dài cạnh huyền."" with plausible distractors.
+    - Cao cấp (Advanced): conceptual or multi-part problems requiring deeper reasoning, proofs, or code-level understanding. Example: ""Cho hàm f(x)=x^3-3x+1, chứng minh rằng f có đúng một nghiệm thực và ước lượng nghiệm đó."" 
+    Note: When possible, include short context or constraints for Trung cấp/Cao cấp to avoid ambiguous or trivial items.
 8. If the user asks to create or generate a quiz or exam (e.g. ""tạo đề"", ""soạn đề"", ""generate exam"", ""create quiz""), you MUST set ""intent"": ""create_exam"" and generate the full questions array immediately. Do not ask clarifying questions first.
 8a. If the user specifies a number of questions, generate exactly that many questions. Do not generate more or fewer.
 9. PROACTIVE SUGGESTION RULE: Whenever you generate or modify an exam (intent: ""create_exam""), the ""message"" property in your JSON MUST ALWAYS end with a friendly question in Vietnamese asking the user if they want to modify a specific question, change the difficulty, or randomize a completely new set of questions. (Example: ""Bạn có muốn thay đổi câu hỏi nào không, hoặc tạo một đề thi khác?"").
@@ -470,47 +714,27 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                             int questionCountRequested = requestedCount > 0 ? requestedCount : 0;
                             int questionCountActual = 0;
                             var validQuestionsList = new List<Dictionary<string, object>>();
+                            // If user explicitly requested a number of questions, prefer using existing DB questions of the same level
+                            // when enough are available. This avoids AI generating off-level or low-quality questions.
+                            if (requestedCount > 0)
+                            {
+                                var canonicalLevel = CanonicalizeLevel(level);
+                                var dbCount = (await GetMatchedActiveQuestions(category, canonicalLevel)).Count;
+                                if (dbCount >= requestedCount)
+                                {
+                                    // Use DB-sourced random questions
+                                    validQuestionsList = await BuildRandomQuestionItems(category, canonicalLevel, requestedCount);
+                                    questionCountActual = validQuestionsList.Count;
+                                    questionCountAdjusted = false;
+                                }
+                            }
                             if (data.TryGetProperty("questions", out var questionsProp) && questionsProp.ValueKind == JsonValueKind.Array) {
                                 foreach (var qElem in questionsProp.EnumerateArray()) {
                                     try {
-                                        string qText = qElem.TryGetProperty("text", out var qt) ? qt.GetString() ?? "" : "";
-                                        if (string.IsNullOrEmpty(qText)) continue;
-
-                                        string qType = qElem.TryGetProperty("type", out var qtyp) ? qtyp.GetString() ?? "Multiple Choice" : "Multiple Choice";
-                                        
-                                        var optionsList = new List<string>();
-                                        if (qElem.TryGetProperty("options", out var opts) && opts.ValueKind == JsonValueKind.Array) {
-                                            foreach (var opt in opts.EnumerateArray()) {
-                                                optionsList.Add(opt.GetString() ?? "");
-                                            }
-                                        }
-
-                                        string qAns = qElem.TryGetProperty("answer", out var qans) ? qans.GetString() ?? "A" : "A";
-                                        qAns = qAns.Trim().ToUpper();
-                                        if (qAns.Length > 1) {
-                                            if (optionsList.Count > 0 && (qAns.Contains(optionsList[0].ToUpper()) || qAns == optionsList[0].ToUpper())) qAns = "A";
-                                            else if (optionsList.Count > 1 && (qAns.Contains(optionsList[1].ToUpper()) || qAns == optionsList[1].ToUpper())) qAns = "B";
-                                            else if (optionsList.Count > 2 && (qAns.Contains(optionsList[2].ToUpper()) || qAns == optionsList[2].ToUpper())) qAns = "C";
-                                            else if (optionsList.Count > 3 && (qAns.Contains(optionsList[3].ToUpper()) || qAns == optionsList[3].ToUpper())) qAns = "D";
-                                            else if (qAns.StartsWith("A") || qAns.StartsWith("OPTION A")) qAns = "A";
-                                            else if (qAns.StartsWith("B") || qAns.StartsWith("OPTION B")) qAns = "B";
-                                            else if (qAns.StartsWith("C") || qAns.StartsWith("OPTION C")) qAns = "C";
-                                            else if (qAns.StartsWith("D") || qAns.StartsWith("OPTION D")) qAns = "D";
-                                            else qAns = "A";
-                                        }
-
-                                        var questionItem = new Dictionary<string, object>
+                                        if (TryParseQuestionItem(qElem, out var questionItem, includeQuestionIndex: true) && questionItem != null)
                                         {
-                                            ["text"] = qText,
-                                            ["type"] = qType,
-                                            ["options"] = optionsList,
-                                            ["answer"] = qAns
-                                        };
-                                        if (qElem.TryGetProperty("questionIndex", out var qIndexProp) && qIndexProp.ValueKind == JsonValueKind.Number && qIndexProp.TryGetInt32(out var questionIndex))
-                                        {
-                                            questionItem["questionIndex"] = questionIndex;
+                                            validQuestionsList.Add(questionItem);
                                         }
-                                        validQuestionsList.Add(questionItem);
                                     } catch {
                                         // Skip invalid question element
                                     }
@@ -526,7 +750,8 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                 }
                                 else if (validQuestionsList.Count < requestedCount)
                                 {
-                                    return await HandleCreateExam(category, requestedCount, requestedCount);
+                                    // Not enough AI-provided questions; fallback to DB-created exam which will pull DB questions filtered by level
+                                    return await HandleCreateExam(category, level, requestedCount, requestedCount);
                                 }
                             }
 
@@ -565,14 +790,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                                 {
                                                     // Preserve the previous question unchanged
                                                     var prev = prevQuestions[i];
-                                                    var preservedQuestion = new Dictionary<string, object>
-                                                    {
-                                                        ["text"] = prev.TryGetProperty("text", out var pt) ? pt.GetString() ?? string.Empty : string.Empty,
-                                                        ["type"] = prev.TryGetProperty("type", out var ptype) ? ptype.GetString() ?? "Multiple Choice" : "Multiple Choice",
-                                                        ["options"] = prev.TryGetProperty("options", out var popts) && popts.ValueKind == JsonValueKind.Array ? popts.EnumerateArray().Select(x => x.GetString() ?? string.Empty).ToList() : new List<string>(),
-                                                        ["answer"] = prev.TryGetProperty("answer", out var pans) ? pans.GetString() ?? "A" : "A"
-                                                    };
-                                                    patchedQuestions.Add(preservedQuestion);
+                                                    patchedQuestions.Add(BuildQuestionItemFromStoredJson(prev));
                                                 }
                                             }
                                             validQuestionsList = patchedQuestions;
@@ -593,14 +811,8 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                                                             int toAdd = Math.Max(0, desired - prevQuestions.Count);
                                                                             if (toAdd > 0)
                                                                             {
-                                                                                var extra = await BuildRandomQuestionItems(category, toAdd);
-                                                                                var patched = prevQuestions.Select(prev => new Dictionary<string, object>
-                                                                                {
-                                                                                    ["text"] = prev.TryGetProperty("text", out var pt) ? pt.GetString() ?? string.Empty : string.Empty,
-                                                                                    ["type"] = prev.TryGetProperty("type", out var ptype) ? ptype.GetString() ?? "Multiple Choice" : "Multiple Choice",
-                                                                                    ["options"] = prev.TryGetProperty("options", out var popts) && popts.ValueKind == JsonValueKind.Array ? popts.EnumerateArray().Select(x => x.GetString() ?? string.Empty).ToList() : new List<string>(),
-                                                                                    ["answer"] = prev.TryGetProperty("answer", out var pans) ? pans.GetString() ?? "A" : "A"
-                                                                                }).ToList();
+                                                                                var extra = await BuildRandomQuestionItems(category, level, toAdd);
+                                                                                var patched = prevQuestions.Select(BuildQuestionItemFromStoredJson).ToList();
 
                                                                                 patched.AddRange(extra);
                                                                                 validQuestionsList = patched;
@@ -608,25 +820,13 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                                                             else
                                                                             {
                                                                                 // Fallback: preserve previous exam
-                                                                                validQuestionsList = prevQuestions.Select(prev => new Dictionary<string, object>
-                                                                                {
-                                                                                    ["text"] = prev.TryGetProperty("text", out var pt) ? pt.GetString() ?? string.Empty : string.Empty,
-                                                                                    ["type"] = prev.TryGetProperty("type", out var ptype) ? ptype.GetString() ?? "Multiple Choice" : "Multiple Choice",
-                                                                                    ["options"] = prev.TryGetProperty("options", out var popts) && popts.ValueKind == JsonValueKind.Array ? popts.EnumerateArray().Select(x => x.GetString() ?? string.Empty).ToList() : new List<string>(),
-                                                                                    ["answer"] = prev.TryGetProperty("answer", out var pans) ? pans.GetString() ?? "A" : "A"
-                                                                                }).ToList();
+                                                                                validQuestionsList = prevQuestions.Select(BuildQuestionItemFromStoredJson).ToList();
                                                                             }
                                                                         }
                                                                         else
                                                                         {
                                                                             // Preserve the entire previous exam for safety.
-                                                                            validQuestionsList = prevQuestions.Select(prev => new Dictionary<string, object>
-                                                                            {
-                                                                                ["text"] = prev.TryGetProperty("text", out var pt) ? pt.GetString() ?? string.Empty : string.Empty,
-                                                                                ["type"] = prev.TryGetProperty("type", out var ptype) ? ptype.GetString() ?? "Multiple Choice" : "Multiple Choice",
-                                                                                ["options"] = prev.TryGetProperty("options", out var popts) && popts.ValueKind == JsonValueKind.Array ? popts.EnumerateArray().Select(x => x.GetString() ?? string.Empty).ToList() : new List<string>(),
-                                                                                ["answer"] = prev.TryGetProperty("answer", out var pans) ? pans.GetString() ?? "A" : "A"
-                                                                            }).ToList();
+                                                                            validQuestionsList = prevQuestions.Select(BuildQuestionItemFromStoredJson).ToList();
                                                                         }
                                                                     }
                                                                 }
@@ -694,35 +894,10 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                         if (!mqElem.TryGetProperty("index", out var indexProp) || !indexProp.TryGetInt32(out var idx))
                                             continue;
 
-                                        string qText = mqElem.TryGetProperty("text", out var qt) ? qt.GetString() ?? "" : "";
-                                        if (string.IsNullOrEmpty(qText)) continue;
-
-                                        string qType = mqElem.TryGetProperty("type", out var qtyp) ? qtyp.GetString() ?? "Multiple Choice" : "Multiple Choice";
-                                        
-                                        var optionsList = new List<string>();
-                                        if (mqElem.TryGetProperty("options", out var opts) && opts.ValueKind == JsonValueKind.Array) {
-                                            foreach (var opt in opts.EnumerateArray()) {
-                                                optionsList.Add(opt.GetString() ?? "");
-                                            }
-                                        }
-
-                                        string qAns = mqElem.TryGetProperty("answer", out var qans) ? qans.GetString() ?? "A" : "A";
-                                        qAns = qAns.Trim().ToUpper();
-                                        if (qAns.Length > 1) {
-                                            if (optionsList.Count > 0 && qAns.Contains(optionsList[0].ToUpper())) qAns = "A";
-                                            else if (optionsList.Count > 1 && qAns.Contains(optionsList[1].ToUpper())) qAns = "B";
-                                            else if (optionsList.Count > 2 && qAns.Contains(optionsList[2].ToUpper())) qAns = "C";
-                                            else if (optionsList.Count > 3 && qAns.Contains(optionsList[3].ToUpper())) qAns = "D";
-                                            else qAns = "A";
-                                        }
-
-                                        modifiedQuestionsDict[idx] = new Dictionary<string, object>
+                                        if (TryParseQuestionItem(mqElem, out var parsedItem) && parsedItem != null)
                                         {
-                                            ["text"] = qText,
-                                            ["type"] = qType,
-                                            ["options"] = optionsList,
-                                            ["answer"] = qAns
-                                        };
+                                            modifiedQuestionsDict[idx] = parsedItem;
+                                        }
                                     }
                                     catch { }
                                 }
@@ -737,25 +912,10 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                         {
                                             try
                                             {
-                                                string qText = aq.TryGetProperty("text", out var qt) ? qt.GetString() ?? "" : "";
-                                                if (string.IsNullOrEmpty(qText)) continue;
-                                                string qType = aq.TryGetProperty("type", out var qtyp) ? qtyp.GetString() ?? "Multiple Choice" : "Multiple Choice";
-                                                var optionsList = new List<string>();
-                                                if (aq.TryGetProperty("options", out var opts) && opts.ValueKind == JsonValueKind.Array)
+                                                if (TryParseQuestionItem(aq, out var parsedAdditional) && parsedAdditional != null)
                                                 {
-                                                    foreach (var opt in opts.EnumerateArray()) optionsList.Add(opt.GetString() ?? "");
+                                                    additionalQuestionsList.Add(parsedAdditional);
                                                 }
-                                                string qAns = aq.TryGetProperty("answer", out var qans) ? qans.GetString() ?? "A" : "A";
-                                                qAns = qAns.Trim().ToUpper();
-                                                if (qAns.Length > 1) qAns = qAns[0].ToString();
-
-                                                additionalQuestionsList.Add(new Dictionary<string, object>
-                                                {
-                                                    ["text"] = qText,
-                                                    ["type"] = qType,
-                                                    ["options"] = optionsList,
-                                                    ["answer"] = qAns
-                                                });
                                             }
                                             catch { }
                                         }
@@ -775,35 +935,10 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                         {
                                             try
                                             {
-                                                string qText = qElem.TryGetProperty("text", out var qt) ? qt.GetString() ?? "" : "";
-                                                if (string.IsNullOrEmpty(qText)) continue;
-
-                                                string qType = qElem.TryGetProperty("type", out var qtyp) ? qtyp.GetString() ?? "Multiple Choice" : "Multiple Choice";
-                                                
-                                                var optionsList = new List<string>();
-                                                if (qElem.TryGetProperty("options", out var opts) && opts.ValueKind == JsonValueKind.Array) {
-                                                    foreach (var opt in opts.EnumerateArray()) {
-                                                        optionsList.Add(opt.GetString() ?? "");
-                                                    }
-                                                }
-
-                                                string qAns = qElem.TryGetProperty("answer", out var qans) ? qans.GetString() ?? "A" : "A";
-                                                qAns = qAns.Trim().ToUpper();
-                                                if (qAns.Length > 1) {
-                                                    if (optionsList.Count > 0 && qAns.Contains(optionsList[0].ToUpper())) qAns = "A";
-                                                    else if (optionsList.Count > 1 && qAns.Contains(optionsList[1].ToUpper())) qAns = "B";
-                                                    else if (optionsList.Count > 2 && qAns.Contains(optionsList[2].ToUpper())) qAns = "C";
-                                                    else if (optionsList.Count > 3 && qAns.Contains(optionsList[3].ToUpper())) qAns = "D";
-                                                    else qAns = "A";
-                                                }
-
-                                                fallbackQuestions.Add(new Dictionary<string, object>
+                                                if (TryParseQuestionItem(qElem, out var fallbackItem) && fallbackItem != null)
                                                 {
-                                                    ["text"] = qText,
-                                                    ["type"] = qType,
-                                                    ["options"] = optionsList,
-                                                    ["answer"] = qAns
-                                                });
+                                                    fallbackQuestions.Add(fallbackItem);
+                                                }
                                             }
                                             catch { }
                                         }
@@ -842,14 +977,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                                 {
                                                     // Preserve original
                                                     var prev = prevQuestions[i];
-                                                    var preservedQuestion = new Dictionary<string, object>
-                                                    {
-                                                        ["text"] = prev.TryGetProperty("text", out var pt) ? pt.GetString() ?? "" : "",
-                                                        ["type"] = prev.TryGetProperty("type", out var ptype) ? ptype.GetString() ?? "Multiple Choice" : "Multiple Choice",
-                                                        ["options"] = prev.TryGetProperty("options", out var popts) && popts.ValueKind == JsonValueKind.Array ? popts.EnumerateArray().Select(x => x.GetString() ?? "").ToList() : new List<string>(),
-                                                        ["answer"] = prev.TryGetProperty("answer", out var pans) ? pans.GetString() ?? "A" : "A"
-                                                    };
-                                                    patchedQuestions.Add(preservedQuestion);
+                                                    patchedQuestions.Add(BuildQuestionItemFromStoredJson(prev));
                                                 }
                                             }
 
@@ -966,7 +1094,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                 Console.Error.WriteLine($"[Chatbot Error] {ex.GetType().Name}: {ex.Message}");
                 if (isExamRequest)
                 {
-                    var (category, count) = ParseExamIntentLocally(request.Message);
+                    var (category, count, level) = ParseExamIntentLocally(request.Message);
                     if (string.IsNullOrEmpty(category))
                     {
                         category = await _context.QuestionBank
@@ -974,39 +1102,33 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                             .FirstOrDefaultAsync() ?? "Chung";
                     }
 
-                    return await HandleCreateExam(category, count, count);
+                    return await HandleCreateExam(category, level, count, count);
                 }
                 return Ok(new { message = "Xin lỗi, tôi gặp một chút trục trặc khi kết nối với bộ não AI. Vui lòng thử lại sau giây lát.", hasDraft = false });
             }
         }
 
-        private (string Category, int Count) ParseExamIntentLocally(string message)
+        private (string Category, int Count, string Level) ParseExamIntentLocally(string message)
         {
             var countMatch = System.Text.RegularExpressions.Regex.Match(message, @"(\d+)\s*câu");
             int count = countMatch.Success ? int.Parse(countMatch.Groups[1].Value) : 10;
+            string level = CanonicalizeLevel(message);
 
             // Tìm category (tìm các keyword phổ biến)
             string category = "";
-            var categoryMap = new Dictionary<string, string[]>
-            {
-                { "C#",         new[] { "c#", "csharp", "c sharp" } },
-                { "IT",         new[] { "it", "công nghệ thông tin", "cntt" } },
-                { "SQL Server", new[] { "sql", "sql server", "database" } },
-                { "ASP.NET",    new[] { "asp.net", "aspnet", "asp net" } },
-                { "Math",       new[] { "toán", "math", "toán học" } },
-            };
 
-            string msgLower = message.ToLower();
-            foreach (var kv in categoryMap)
+            string msgLower = NormalizeForMatch(message);
+            foreach (var kv in CategoryAliases)
             {
-                if (kv.Value.Any(k => msgLower.Contains(k)))
+                var keywords = kv.Value.Select(NormalizeForMatch).Where(k => !string.IsNullOrEmpty(k));
+                if (keywords.Any(k => msgLower.Contains(k, StringComparison.Ordinal)))
                 {
                     category = kv.Key;
                     break;
                 }
             }
 
-            return (category, count);
+            return (category, count, level);
         }
 
         private List<int> ParseRequestedQuestionIndexes(string message)
@@ -1052,20 +1174,19 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
             return result.Distinct().ToList();
         }
 
-        private async Task<IActionResult> HandleCreateExam(string category, int count, int? requestedCount = null)
+        private async Task<IActionResult> HandleCreateExam(string category, string level, int count, int? requestedCount = null)
         {
-            var availableQuestions = await _context.QuestionBank
-                .Where(q => q.Category == category && q.IsActive == true)
-                .ToListAsync();
+            var canonicalLevel = CanonicalizeLevel(level);
+            var matchedQuestions = await GetMatchedActiveQuestions(category, canonicalLevel);
 
-            if (availableQuestions.Count == 0)
+            if (matchedQuestions.Count == 0)
             {
                 return Ok(new { response = $"Tôi xin lỗi, hiện tại trong kho không có câu hỏi nào thuộc chủ đề '{category}'." });
             }
 
-            int actualCount = Math.Min(count, availableQuestions.Count);
+            int actualCount = Math.Min(count, matchedQuestions.Count);
 
-            var randomQuestions = availableQuestions
+            var randomQuestions = matchedQuestions
                 .OrderBy(q => Guid.NewGuid())
                 .Take(actualCount)
                 .ToList();
@@ -1075,7 +1196,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                 Title = $"Đề thi {category} (Tạo bởi AI)",
                 Description = $"Đề thi tự động gồm {actualCount} câu hỏi chủ đề {category}.",
                 Category = category,
-                Level = "Trung cấp",
+                Level = canonicalLevel,
                 TimeLimit = actualCount * 2, 
                 TotalScore = totalScore,
                 Status = "Published",         
