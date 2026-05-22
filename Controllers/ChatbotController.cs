@@ -9,6 +9,7 @@ using System.Linq;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Encodings.Web;
 using System.Threading.Tasks;
 
 namespace QuizApi.Controllers
@@ -20,11 +21,16 @@ namespace QuizApi.Controllers
     {
         private readonly GroqService _groqService;
         private readonly QuizDbContext _context;
+        private static readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions
+        {
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.All)
+        };
 
         private static readonly Dictionary<string, string[]> CategoryAliases = new(StringComparer.OrdinalIgnoreCase)
         {
-            { "C#",         new[] { "c#", "csharp", "c sharp", "dotnet", ".net" } },
-            { "IT",         new[] { "công nghệ thông tin", "cntt", "information technology" } },
+            { "C#",         new[] { "c#", "csharp", "c sharp" } },
+            { ".NET Core",  new[] { "dotnet", ".net", ".net core", "dotnet core" } },
+            { "IT",         new[] { "công nghệ thông tin", "cntt", "information technology", "it" } },
             { "SQL Server", new[] { "sql", "sql server", "database", "db", "t-sql", "tsql" } },
             { "ASP.NET",    new[] { "asp.net", "aspnet", "asp net" } },
             { "Toán",       new[] { "toán", "math", "toán học", "mathematics" } },
@@ -37,11 +43,25 @@ namespace QuizApi.Controllers
             var rawSource = source.ToLowerInvariant();
             var rawAlias = alias.ToLowerInvariant().Trim();
 
-            if (rawAlias is "c#" or "csharp" or "c sharp" or "dotnet" or ".net")
+            if (rawAlias is "c#" or "csharp" or "c sharp")
             {
                 return System.Text.RegularExpressions.Regex.IsMatch(
                     rawSource,
-                    @"\bc#\b|\bcsharp\b|\bc sharp\b|\bdotnet\b|\.net\b",
+                    @"\bc#\b|\bcsharp\b|\bc sharp\b",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            }
+            if (rawAlias is "dotnet" or ".net" or ".net core" or "dotnet core")
+            {
+                return System.Text.RegularExpressions.Regex.IsMatch(
+                    rawSource,
+                    @"\bdotnet\b|\.net\b",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            }
+            if (rawAlias is "it")
+            {
+                return System.Text.RegularExpressions.Regex.IsMatch(
+                    rawSource,
+                    @"\bit\b",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             }
 
@@ -217,7 +237,7 @@ namespace QuizApi.Controllers
                     questions
                 };
 
-                return JsonSerializer.Serialize(compactContext);
+                return JsonSerializer.Serialize(compactContext, _jsonOptions);
             }
             catch
             {
@@ -266,51 +286,42 @@ namespace QuizApi.Controllers
             return collapsed;
         }
 
-        private static IReadOnlyList<string> GetCategoryTerms(string category)
+        /// <summary>
+        /// Trả về canonical key của category (e.g. "C#", ".NET Core", "IT") dựa trên
+        /// tên category hoặc alias. Trả về null nếu không nhận ra.
+        /// </summary>
+        private static string? ResolveCanonicalCategory(string category)
         {
-            if (string.IsNullOrWhiteSpace(category)) return Array.Empty<string>();
+            if (string.IsNullOrWhiteSpace(category)) return null;
 
+            // Tìm match trong CategoryAliases
             foreach (var kv in CategoryAliases)
             {
-                var canonicalNormalized = NormalizeForMatch(kv.Key);
-                var aliasNormalized = kv.Value.Select(NormalizeForMatch).Where(x => !string.IsNullOrWhiteSpace(x) && x.Length >= 2).ToList();
+                // So khớp với chính canonical key
+                if (string.Equals(category.Trim(), kv.Key, StringComparison.OrdinalIgnoreCase))
+                    return kv.Key;
 
-                if (ContainsAlias(category, kv.Key) || kv.Value.Any(alias => ContainsAlias(category, alias)))
-                {
-                    var terms = new HashSet<string>(StringComparer.Ordinal)
-                    {
-                        canonicalNormalized,
-                        NormalizeForMatch(category)
-                    };
-                    foreach (var alias in aliasNormalized)
-                    {
-                        terms.Add(alias);
-                    }
-                    return terms.ToList();
-                }
+                // So khớp với aliases
+                if (kv.Value.Any(alias => string.Equals(category.Trim(), alias, StringComparison.OrdinalIgnoreCase)))
+                    return kv.Key;
             }
 
-            return new[] { NormalizeForMatch(category) };
+            // Không nhận ra → trả nguyên bản (để match exact với DB)
+            return category.Trim();
         }
 
         private static bool IsCategoryMatch(string dbCategory, string requestedCategory)
         {
-            var dbNorm = NormalizeForMatch(dbCategory);
-            if (string.IsNullOrEmpty(dbNorm)) return false;
+            if (string.IsNullOrWhiteSpace(dbCategory)) return false;
 
-            var terms = GetCategoryTerms(requestedCategory);
-            if (terms.Count == 0) return true;
+            // Resolve cả hai về canonical key
+            var requestedCanonical = ResolveCanonicalCategory(requestedCategory);
+            var dbCanonical = ResolveCanonicalCategory(dbCategory);
 
-            foreach (var term in terms)
-            {
-                if (string.IsNullOrEmpty(term)) continue;
-                if (dbNorm.Equals(term, StringComparison.Ordinal) || dbNorm.Contains(term, StringComparison.Ordinal) || term.Contains(dbNorm, StringComparison.Ordinal))
-                {
-                    return true;
-                }
-            }
+            if (string.IsNullOrWhiteSpace(requestedCanonical)) return true; // không lọc
 
-            return false;
+            // So sánh exact canonical key
+            return string.Equals(dbCanonical, requestedCanonical, StringComparison.OrdinalIgnoreCase);
         }
 
         private static string CanonicalizeLevel(string level)
@@ -704,6 +715,8 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
 
                             string category = "Chung";
                             if (data.TryGetProperty("category", out var catProp)) category = catProp.GetString() ?? category;
+                            // Normalize category AI trả về về canonical key (C#, .NET Core, IT...)
+                            category = ResolveCanonicalCategory(category) ?? category;
 
                             string level = "Sơ cấp";
                             if (data.TryGetProperty("level", out var levelProp)) {
@@ -760,7 +773,10 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                     questionCountAdjusted = false;
                                 }
                             }
-                            if (data.TryGetProperty("questions", out var questionsProp) && questionsProp.ValueKind == JsonValueKind.Array) {
+                            // Chỉ dùng câu hỏi từ AI nếu DB chưa đủ số lượng cần thiết
+                            // (tránh trộn câu hỏi sai chủ đề do AI sinh ra)
+                            bool dbAlreadyFulfilled = requestedCount > 0 && validQuestionsList.Count >= requestedCount;
+                            if (!dbAlreadyFulfilled && data.TryGetProperty("questions", out var questionsProp) && questionsProp.ValueKind == JsonValueKind.Array) {
                                 foreach (var qElem in questionsProp.EnumerateArray()) {
                                     try {
                                         if (TryParseQuestionItem(qElem, out var questionItem, includeQuestionIndex: true) && questionItem != null)
@@ -880,7 +896,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                 totalScore = totalScore,
                                 questions = validQuestionsList,
                                 message = message
-                            });
+                            }, _jsonOptions);
 
                             var chatMsg = new ChatMessage {
                                 Username = User.Identity?.Name ?? "Admin",
@@ -1048,7 +1064,6 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                             if (prevTS.ValueKind == JsonValueKind.Number) totalScore = prevTS.GetDouble();
                                             else if (prevTS.ValueKind == JsonValueKind.String && double.TryParse(prevTS.GetString(), out double tsVal)) totalScore = tsVal;
                                         }
-
                                         int totalAddedQuestions = additionalQuestionsList.Count + appendedQuestions.Count;
                                         int totalModifiedQuestions = modifiedQuestionsDict.Count - appendedQuestions.Count;
                                         string message = totalAddedQuestions > 0
@@ -1070,7 +1085,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                             totalScore,
                                             questions = patchedQuestions,
                                             message
-                                        });
+                                        }, _jsonOptions);
 
                                         var chatMsg = new ChatMessage
                                         {
@@ -1170,18 +1185,17 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
             string msgLower = NormalizeForMatch(message);
             foreach (var kv in CategoryAliases)
             {
-                if (kv.Key == "C#")
+                bool matched = false;
+                foreach (var alias in kv.Value)
                 {
-                    if (ContainsAlias(message, "c#") || ContainsAlias(message, "csharp") || ContainsAlias(message, "c sharp") || ContainsAlias(message, "dotnet") || ContainsAlias(message, ".net"))
+                    if (ContainsAlias(message, alias))
                     {
-                        category = kv.Key;
+                        matched = true;
                         break;
                     }
-                    continue;
                 }
-
-                var keywords = kv.Value.Select(NormalizeForMatch).Where(k => !string.IsNullOrEmpty(k));
-                if (keywords.Any(k => msgLower.Contains(k, StringComparison.Ordinal)))
+                
+                if (matched)
                 {
                     category = kv.Key;
                     break;
@@ -1322,7 +1336,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                 totalScore = newExam.TotalScore,
                 questions = questionsForMetadata,
                 message = responseMessage
-            });
+            }, _jsonOptions);
 
             var chatMsg = new ChatMessage {
                 Username = User.Identity?.Name ?? "Admin",
