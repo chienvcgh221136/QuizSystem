@@ -936,12 +936,25 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                 {
                                     try
                                     {
-                                        if (!mqElem.TryGetProperty("index", out var indexProp) || !indexProp.TryGetInt32(out var idx))
+                                        if (!mqElem.TryGetProperty("index", out var indexProp))
+                                            continue;
+
+                                        int? idx = null;
+                                        if (indexProp.ValueKind == JsonValueKind.Number && indexProp.TryGetInt32(out var numericIndex))
+                                        {
+                                            idx = numericIndex;
+                                        }
+                                        else if (indexProp.ValueKind == JsonValueKind.String && int.TryParse(indexProp.GetString(), out var stringIndex))
+                                        {
+                                            idx = stringIndex;
+                                        }
+
+                                        if (!idx.HasValue)
                                             continue;
 
                                         if (TryParseQuestionItem(mqElem, out var parsedItem) && parsedItem != null)
                                         {
-                                            modifiedQuestionsDict[idx] = parsedItem;
+                                            modifiedQuestionsDict[idx.Value] = parsedItem;
                                         }
                                     }
                                     catch { }
@@ -975,9 +988,24 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                             if (modifiedQuestionsDict.Count == 0 && requestedQuestionIndexes.Count > 0)
                             {
                                 Console.WriteLine($"[Debug] Fallback: Checking if data has questions field");
-                                if (data.TryGetProperty("questions", out var fallbackQsProp) && fallbackQsProp.ValueKind == JsonValueKind.Array)
+                                var fallbackQuestions = new List<Dictionary<string, object>>();
+                                if (data.TryGetProperty("modifiedQuestions", out var modifiedQsFallbackProp) && modifiedQsFallbackProp.ValueKind == JsonValueKind.Array)
                                 {
-                                    var fallbackQuestions = new List<Dictionary<string, object>>();
+                                    foreach (var qElem in modifiedQsFallbackProp.EnumerateArray())
+                                    {
+                                        try
+                                        {
+                                            if (TryParseQuestionItem(qElem, out var fallbackItem) && fallbackItem != null)
+                                            {
+                                                fallbackQuestions.Add(fallbackItem);
+                                            }
+                                        }
+                                        catch { }
+                                    }
+                                }
+
+                                if (fallbackQuestions.Count == 0 && data.TryGetProperty("questions", out var fallbackQsProp) && fallbackQsProp.ValueKind == JsonValueKind.Array)
+                                {
                                     foreach (var qElem in fallbackQsProp.EnumerateArray())
                                     {
                                         try
@@ -989,15 +1017,15 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                         }
                                         catch { }
                                     }
-
-                                    Console.WriteLine($"[Debug] Fallback: Found {fallbackQuestions.Count} questions in data");
-                                    for (int i = 0; i < fallbackQuestions.Count && i < requestedQuestionIndexes.Count; i++)
-                                    {
-                                        modifiedQuestionsDict[requestedQuestionIndexes[i]] = fallbackQuestions[i];
-                                    }
-
-                                    Console.WriteLine($"[Debug] Fallback: Populated {modifiedQuestionsDict.Count} modified questions");
                                 }
+
+                                Console.WriteLine($"[Debug] Fallback: Found {fallbackQuestions.Count} questions in data");
+                                for (int i = 0; i < fallbackQuestions.Count && i < requestedQuestionIndexes.Count; i++)
+                                {
+                                    modifiedQuestionsDict[requestedQuestionIndexes[i]] = fallbackQuestions[i];
+                                }
+
+                                Console.WriteLine($"[Debug] Fallback: Populated {modifiedQuestionsDict.Count} modified questions");
                             }
 
                             if (!string.IsNullOrEmpty(previousExamMetadata) && (modifiedQuestionsDict.Count > 0 || additionalQuestionsList.Count > 0))
@@ -1236,6 +1264,19 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
             if (result.Count == 0)
             {
                 regex = new System.Text.RegularExpressions.Regex(@"[qQ]\s*(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (System.Text.RegularExpressions.Match match in regex.Matches(message))
+                {
+                    if (int.TryParse(match.Groups[1].Value, out var idx))
+                    {
+                        result.Add(idx);
+                    }
+                }
+            }
+
+            // Pattern 4: number before "câu" or "câu hỏi", often used in modification requests like "sửa 1 câu"
+            if (result.Count == 0)
+            {
+                regex = new System.Text.RegularExpressions.Regex(@"(\d+)\s*(?:câu|cau|câu hỏi|question|questions)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 foreach (System.Text.RegularExpressions.Match match in regex.Matches(message))
                 {
                     if (int.TryParse(match.Groups[1].Value, out var idx))
