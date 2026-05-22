@@ -56,15 +56,30 @@ namespace QuizApi.Controllers
         [HttpPost]
         public async Task<ActionResult<User>> CreateUser(User user)
         {
-            if (await _context.Users.AnyAsync(u => u.Username == user.Username))
+            user.Username = user.Username?.Trim();
+            user.FullName = user.FullName?.Trim();
+            user.Email = user.Email?.Trim();
+
+            if (string.IsNullOrWhiteSpace(user.Username))
+                return BadRequest(new { message = "Username is required" });
+
+            if (await _context.Users.AnyAsync(u => u.Username != null && u.Username.ToLower() == user.Username.ToLower()))
                 return BadRequest(new { message = "Username already exists" });
 
             string rawPassWord= string.IsNullOrEmpty(user.PasswordHash) ? "123456" : user.PasswordHash;
             user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(rawPassWord);
+            user.IsActive ??= true;
             
             user.CreatedAt = System.DateTime.Now;
-            _context.Users.Add(user);
-            await _context.SaveChangesAsync();
+            try
+            {
+                _context.Users.Add(user);
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateException ex)
+            {
+                return BadRequest(new { message = "Không thể tạo người dùng. Có thể username hoặc dữ liệu bị trùng/không hợp lệ.", error = ex.InnerException?.Message ?? ex.Message });
+            }
 
             return CreatedAtAction(nameof(GetUser), new { id = user.UserId }, user);
         }
@@ -77,13 +92,22 @@ namespace QuizApi.Controllers
             var existing = await _context.Users.FindAsync(id);
             if (existing == null) return NotFound();
 
+            user.FullName = user.FullName?.Trim();
+            user.Email = user.Email?.Trim();
+
             existing.FullName = user.FullName;
             existing.Email = user.Email;
             existing.Role = user.Role;
             if(!string.IsNullOrEmpty(user.PasswordHash))
                 existing.PasswordHash = BCrypt.Net.BCrypt.HashPassword(user.PasswordHash);
+            if (user.IsActive.HasValue)
+                existing.IsActive = user.IsActive;
             try { await _context.SaveChangesAsync(); }
             catch (DbUpdateConcurrencyException) { if (!UserExists(id)) return NotFound(); else throw; }
+            catch (DbUpdateException ex)
+            {
+                return BadRequest(new { message = "Không thể cập nhật người dùng. Dữ liệu không hợp lệ.", error = ex.InnerException?.Message ?? ex.Message });
+            }
 
             return NoContent();
         }

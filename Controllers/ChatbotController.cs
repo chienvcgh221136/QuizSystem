@@ -30,6 +30,33 @@ namespace QuizApi.Controllers
             { "Toán",       new[] { "toán", "math", "toán học", "mathematics" } },
         };
 
+        private static bool ContainsAlias(string source, string alias)
+        {
+            if (string.IsNullOrWhiteSpace(source) || string.IsNullOrWhiteSpace(alias)) return false;
+
+            var rawSource = source.ToLowerInvariant();
+            var rawAlias = alias.ToLowerInvariant().Trim();
+
+            if (rawAlias is "c#" or "csharp" or "c sharp" or "dotnet" or ".net")
+            {
+                return System.Text.RegularExpressions.Regex.IsMatch(
+                    rawSource,
+                    @"\bc#\b|\bcsharp\b|\bc sharp\b|\bdotnet\b|\.net\b",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            }
+
+            var normalizedSource = NormalizeForMatch(source);
+            var normalizedAlias = NormalizeForMatch(alias);
+            if (string.IsNullOrWhiteSpace(normalizedAlias)) return false;
+
+            if (normalizedAlias.Length >= 3)
+            {
+                return normalizedSource.Contains(normalizedAlias, StringComparison.Ordinal);
+            }
+
+            return rawSource.Contains(rawAlias, StringComparison.Ordinal);
+        }
+
         private static readonly Dictionary<string, string[]> LevelAliases = new(StringComparer.OrdinalIgnoreCase)
         {
             { "Sơ cấp", new[] { "sơ cấp", "so cap", "dễ", "de", "cơ bản", "co ban", "elementary", "easy", "beginner", "basic" } },
@@ -142,7 +169,7 @@ namespace QuizApi.Controllers
                 .ToList();
         }
 
-        private static string? BuildCompactPreviousExamContext(string? metadata, List<int> requestedQuestionIndexes)
+        private static string? BuildCompactPreviousExamContext(string? metadata, List<int> requestedQuestionIndexes, int maxQuestionsToInclude = 3)
         {
             if (string.IsNullOrWhiteSpace(metadata)) return null;
 
@@ -157,7 +184,7 @@ namespace QuizApi.Controllers
                     var allQuestions = questionsProp.EnumerateArray().ToList();
                     var indexesToInclude = requestedQuestionIndexes.Count > 0
                         ? requestedQuestionIndexes.Distinct().Where(index => index > 0 && index <= allQuestions.Count).ToList()
-                        : Enumerable.Range(1, allQuestions.Count).ToList();
+                        : Enumerable.Range(1, Math.Min(allQuestions.Count, Math.Max(1, maxQuestionsToInclude))).ToList();
 
                     foreach (var index in indexesToInclude)
                     {
@@ -241,20 +268,19 @@ namespace QuizApi.Controllers
 
         private static IReadOnlyList<string> GetCategoryTerms(string category)
         {
-            var normalizedCategory = NormalizeForMatch(category);
-            if (string.IsNullOrEmpty(normalizedCategory)) return Array.Empty<string>();
+            if (string.IsNullOrWhiteSpace(category)) return Array.Empty<string>();
 
             foreach (var kv in CategoryAliases)
             {
                 var canonicalNormalized = NormalizeForMatch(kv.Key);
-                var aliasNormalized = kv.Value.Select(NormalizeForMatch).Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+                var aliasNormalized = kv.Value.Select(NormalizeForMatch).Where(x => !string.IsNullOrWhiteSpace(x) && x.Length >= 2).ToList();
 
-                if (normalizedCategory == canonicalNormalized || aliasNormalized.Any(a => normalizedCategory.Contains(a, StringComparison.Ordinal)))
+                if (ContainsAlias(category, kv.Key) || kv.Value.Any(alias => ContainsAlias(category, alias)))
                 {
                     var terms = new HashSet<string>(StringComparer.Ordinal)
                     {
                         canonicalNormalized,
-                        normalizedCategory
+                        NormalizeForMatch(category)
                     };
                     foreach (var alias in aliasNormalized)
                     {
@@ -264,7 +290,7 @@ namespace QuizApi.Controllers
                 }
             }
 
-            return new[] { normalizedCategory };
+            return new[] { NormalizeForMatch(category) };
         }
 
         private static bool IsCategoryMatch(string dbCategory, string requestedCategory)
@@ -369,6 +395,11 @@ namespace QuizApi.Controllers
 
         private static string NormalizeAnswerChoice(string? rawAnswer, List<string> options)
         {
+            if (options == null || options.Count == 0)
+            {
+                return rawAnswer ?? string.Empty;
+            }
+
             var normalized = (rawAnswer ?? "A").Trim().ToUpperInvariant();
             if (normalized.Length == 1 && "ABCD".Contains(normalized))
             {
@@ -503,7 +534,7 @@ namespace QuizApi.Controllers
                 .OrderBy(m => m.SentAt)
                 .ToListAsync();
             var compactHistory = BuildCompactHistory(history, 3);
-            bool isExamModificationRequest = userMsg.Contains("thay đổi câu") || userMsg.Contains("đổi câu") || userMsg.Contains("sửa câu") || userMsg.Contains("chỉnh sửa câu") || userMsg.Contains("đổi đề") || userMsg.Contains("thay đổi đề") || userMsg.Contains("sửa đề") || userMsg.Contains("thay đổi độ khó") || userMsg.Contains("giảm độ khó") || userMsg.Contains("tăng độ khó");
+            bool isExamModificationRequest = userMsg.Contains("thay đổi câu") || userMsg.Contains("đổi câu") || userMsg.Contains("sửa câu") || userMsg.Contains("chỉnh sửa câu") || userMsg.Contains("đổi đề") || userMsg.Contains("thay đổi đề") || userMsg.Contains("sửa đề") || userMsg.Contains("thay đổi độ khó") || userMsg.Contains("giảm độ khó") || userMsg.Contains("tăng độ khó") || userMsg.Contains("thêm câu") || userMsg.Contains("thêm 1 câu") || userMsg.Contains("thêm 2 câu") || userMsg.Contains("thêm 3 câu") || userMsg.Contains("bổ sung câu") || userMsg.Contains("cộng thêm câu") || userMsg.Contains("mở rộng đề") || userMsg.Contains("nâng lên") || userMsg.Contains("tăng lên");
             
             // Debug logging
             Console.WriteLine($"[Debug] isExamModificationRequest: {isExamModificationRequest}");
@@ -534,7 +565,8 @@ namespace QuizApi.Controllers
                     }
                 }
             }
-            string? compactPreviousExamContext = BuildCompactPreviousExamContext(previousExamMetadata, requestedQuestionIndexes);
+            int previousExamQuestionLimit = (isExamModificationRequest && requestedQuestionCount.GetValueOrDefault() > 0 && requestedQuestionIndexes.Count == 0) ? 2 : 3;
+            string? compactPreviousExamContext = BuildCompactPreviousExamContext(previousExamMetadata, requestedQuestionIndexes, previousExamQuestionLimit);
             // If the user explicitly requested to "tạo đề" / create an exam, use DB-only flow and do not call AI.
             if (isExamRequest)
             {
@@ -546,7 +578,7 @@ namespace QuizApi.Controllers
                         .FirstOrDefaultAsync() ?? "Chung";
                 }
 
-                return await HandleCreateExam(categoryLocal, levelLocal, countLocal, countLocal);
+                return await HandleCreateExam(categoryLocal, levelLocal, countLocal, countLocal, request.Message);
             }
 
             string systemPrompt = $@"You are the 'QuizChat Local AI Tutor'.
@@ -751,7 +783,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                 else if (validQuestionsList.Count < requestedCount)
                                 {
                                     // Not enough AI-provided questions; fallback to DB-created exam which will pull DB questions filtered by level
-                                    return await HandleCreateExam(category, level, requestedCount, requestedCount);
+                                    return await HandleCreateExam(category, level, requestedCount, requestedCount, request.Message);
                                 }
                             }
 
@@ -877,16 +909,13 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                     : null
                             });
                         }
-                        else if (data.TryGetProperty("intent", out var modifyIntentProp) && modifyIntentProp.GetString() == "modify_questions") 
+                        else if (data.TryGetProperty("intent", out var modifyIntentProp) && modifyIntentProp.GetString() == "modify_questions")
                         {
-                            // Handle question modification request
                             Console.WriteLine($"[Debug] Processing modify_questions intent");
-                            
+
+                            var modifiedQuestionsDict = new Dictionary<int, Dictionary<string, object>>();
                             if (data.TryGetProperty("modifiedQuestions", out var modifiedQsProp) && modifiedQsProp.ValueKind == JsonValueKind.Array)
                             {
-                                // Parse the modified questions
-                                var modifiedQuestionsDict = new Dictionary<int, Dictionary<string, object>>();
-                                
                                 foreach (var mqElem in modifiedQsProp.EnumerateArray())
                                 {
                                     try
@@ -901,154 +930,175 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                     }
                                     catch { }
                                 }
+                            }
 
-                                Console.WriteLine($"[Debug] Modified {modifiedQuestionsDict.Count} questions");
-
-                                    // Check for explicit 'additionalQuestions' provided by AI
-                                    var additionalQuestionsList = new List<Dictionary<string, object>>();
-                                    if (data.TryGetProperty("additionalQuestions", out var additionalQsProp) && additionalQsProp.ValueKind == JsonValueKind.Array)
-                                    {
-                                        foreach (var aq in additionalQsProp.EnumerateArray())
-                                        {
-                                            try
-                                            {
-                                                if (TryParseQuestionItem(aq, out var parsedAdditional) && parsedAdditional != null)
-                                                {
-                                                    additionalQuestionsList.Add(parsedAdditional);
-                                                }
-                                            }
-                                            catch { }
-                                        }
-                                        Console.WriteLine($"[Debug] Found {additionalQuestionsList.Count} additionalQuestions provided by AI");
-                                    }
-
-                                // FALLBACK: If modifiedQuestionsDict is empty but data has a "questions" field,
-                                // it means AI returned questions in the "questions" field instead of "modifiedQuestions"
-                                // This can happen if AI misunderstands the format
-                                if (modifiedQuestionsDict.Count == 0 && requestedQuestionIndexes.Count > 0)
-                                {
-                                    Console.WriteLine($"[Debug] Fallback: Checking if data has questions field");
-                                    if (data.TryGetProperty("questions", out var fallbackQsProp) && fallbackQsProp.ValueKind == JsonValueKind.Array)
-                                    {
-                                        var fallbackQuestions = new List<Dictionary<string, object>>();
-                                        foreach (var qElem in fallbackQsProp.EnumerateArray())
-                                        {
-                                            try
-                                            {
-                                                if (TryParseQuestionItem(qElem, out var fallbackItem) && fallbackItem != null)
-                                                {
-                                                    fallbackQuestions.Add(fallbackItem);
-                                                }
-                                            }
-                                            catch { }
-                                        }
-
-                                        Console.WriteLine($"[Debug] Fallback: Found {fallbackQuestions.Count} questions in data");
-                                        for (int i = 0; i < fallbackQuestions.Count && i < requestedQuestionIndexes.Count; i++)
-                                        {
-                                            modifiedQuestionsDict[requestedQuestionIndexes[i]] = fallbackQuestions[i];
-                                        }
-                                        Console.WriteLine($"[Debug] Fallback: Populated {modifiedQuestionsDict.Count} modified questions");
-                                    }
-                                }
-
-                                // Now patch them into the previous exam
-                                if (!string.IsNullOrEmpty(previousExamMetadata) && modifiedQuestionsDict.Count > 0)
+                            var additionalQuestionsList = new List<Dictionary<string, object>>();
+                            if (data.TryGetProperty("additionalQuestions", out var additionalQsProp) && additionalQsProp.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var aq in additionalQsProp.EnumerateArray())
                                 {
                                     try
                                     {
-                                        var prevDoc = JsonDocument.Parse(previousExamMetadata);
-                                        if (prevDoc.RootElement.TryGetProperty("questions", out var prevQsProp) && prevQsProp.ValueKind == JsonValueKind.Array)
+                                        if (TryParseQuestionItem(aq, out var parsedAdditional) && parsedAdditional != null)
                                         {
-                                            var prevQuestions = prevQsProp.EnumerateArray().ToList();
-                                            var patchedQuestions = new List<Dictionary<string, object>>();
-
-                                            for (int i = 0; i < prevQuestions.Count; i++)
-                                            {
-                                                int questionNum = i + 1; // 1-based index
-                                                
-                                                if (modifiedQuestionsDict.ContainsKey(questionNum))
-                                                {
-                                                    // Use modified question
-                                                    patchedQuestions.Add(modifiedQuestionsDict[questionNum]);
-                                                    Console.WriteLine($"[Debug] Patching question {questionNum}");
-                                                }
-                                                else
-                                                {
-                                                    // Preserve original
-                                                    var prev = prevQuestions[i];
-                                                    patchedQuestions.Add(BuildQuestionItemFromStoredJson(prev));
-                                                }
-                                            }
-
-                                                // If AI provided explicit additionalQuestions, append them
-                                                if (additionalQuestionsList.Count > 0)
-                                                {
-                                                    patchedQuestions.AddRange(additionalQuestionsList);
-                                                }
-
-                                            // Get metadata from previous exam
-                                            string title = "Đề thi";
-                                            string category = "Chung";
-                                            string level = "Trung cấp";
-                                            int timeLimit = 30;
-                                            double totalScore = 10.0;
-
-                                            if (prevDoc.RootElement.TryGetProperty("title", out var prevTitle)) title = prevTitle.GetString() ?? title;
-                                            if (prevDoc.RootElement.TryGetProperty("category", out var prevCat)) category = prevCat.GetString() ?? category;
-                                            if (prevDoc.RootElement.TryGetProperty("level", out var prevLevel)) level = prevLevel.GetString() ?? level;
-                                            if (prevDoc.RootElement.TryGetProperty("timeLimit", out var prevTL)) {
-                                                if (prevTL.ValueKind == JsonValueKind.Number) timeLimit = prevTL.GetInt32();
-                                                else if (prevTL.ValueKind == JsonValueKind.String && int.TryParse(prevTL.GetString(), out int tlVal)) timeLimit = tlVal;
-                                            }
-                                            if (prevDoc.RootElement.TryGetProperty("totalScore", out var prevTS)) {
-                                                if (prevTS.ValueKind == JsonValueKind.Number) totalScore = prevTS.GetDouble();
-                                                else if (prevTS.ValueKind == JsonValueKind.String && double.TryParse(prevTS.GetString(), out double tsVal)) totalScore = tsVal;
-                                            }
-
-                                            string message = $"Đã cập nhật {modifiedQuestionsDict.Count} câu hỏi. Bạn có muốn thay đổi thêm không?";
-                                            if (data.TryGetProperty("message", out var msgProp)) {
-                                                message = msgProp.GetString() ?? message;
-                                            }
-
-                                            aiText = message;
-                                            metadata = JsonSerializer.Serialize(new {
-                                                intent = "create_exam",
-                                                title = title,
-                                                category = category,
-                                                level = level,
-                                                timeLimit = timeLimit,
-                                                totalScore = totalScore,
-                                                questions = patchedQuestions,
-                                                message = message
-                                            });
-
-                                            var chatMsg = new ChatMessage {
-                                                Username = User.Identity?.Name ?? "Admin",
-                                                UserMessage = request.Message,
-                                                AiResponse = aiText,
-                                                Metadata = metadata
-                                            };
-                                            _context.ChatMessages.Add(chatMsg);
-                                            await _context.SaveChangesAsync();
-
-                                            return Ok(new {
-                                                intent = "create_exam",
-                                                hasDraft = true,
-                                                message = aiText,
-                                                title = title,
-                                                category = category,
-                                                level = level,
-                                                timeLimit = timeLimit,
-                                                totalScore = totalScore,
-                                                questions = patchedQuestions
-                                            });
+                                            additionalQuestionsList.Add(parsedAdditional);
                                         }
                                     }
-                                    catch (Exception ex)
+                                    catch { }
+                                }
+                            }
+
+                            Console.WriteLine($"[Debug] Modified {modifiedQuestionsDict.Count} questions");
+                            Console.WriteLine($"[Debug] Found {additionalQuestionsList.Count} additionalQuestions provided by AI");
+
+                            if (modifiedQuestionsDict.Count == 0 && additionalQuestionsList.Count == 0)
+                            {
+                                Console.WriteLine("[Debug] No modifiedQuestions or additionalQuestions found in AI response");
+                            }
+
+                            if (modifiedQuestionsDict.Count == 0 && requestedQuestionIndexes.Count > 0)
+                            {
+                                Console.WriteLine($"[Debug] Fallback: Checking if data has questions field");
+                                if (data.TryGetProperty("questions", out var fallbackQsProp) && fallbackQsProp.ValueKind == JsonValueKind.Array)
+                                {
+                                    var fallbackQuestions = new List<Dictionary<string, object>>();
+                                    foreach (var qElem in fallbackQsProp.EnumerateArray())
                                     {
-                                        Console.WriteLine($"[Debug] Error patching modified questions: {ex.Message}");
+                                        try
+                                        {
+                                            if (TryParseQuestionItem(qElem, out var fallbackItem) && fallbackItem != null)
+                                            {
+                                                fallbackQuestions.Add(fallbackItem);
+                                            }
+                                        }
+                                        catch { }
                                     }
+
+                                    Console.WriteLine($"[Debug] Fallback: Found {fallbackQuestions.Count} questions in data");
+                                    for (int i = 0; i < fallbackQuestions.Count && i < requestedQuestionIndexes.Count; i++)
+                                    {
+                                        modifiedQuestionsDict[requestedQuestionIndexes[i]] = fallbackQuestions[i];
+                                    }
+
+                                    Console.WriteLine($"[Debug] Fallback: Populated {modifiedQuestionsDict.Count} modified questions");
+                                }
+                            }
+
+                            if (!string.IsNullOrEmpty(previousExamMetadata) && (modifiedQuestionsDict.Count > 0 || additionalQuestionsList.Count > 0))
+                            {
+                                try
+                                {
+                                    var prevDoc = JsonDocument.Parse(previousExamMetadata);
+                                    if (prevDoc.RootElement.TryGetProperty("questions", out var prevQsProp) && prevQsProp.ValueKind == JsonValueKind.Array)
+                                    {
+                                        var prevQuestions = prevQsProp.EnumerateArray().ToList();
+                                        var patchedQuestions = new List<Dictionary<string, object>>();
+                                        var appendedQuestions = new List<KeyValuePair<int, Dictionary<string, object>>>();
+
+                                        for (int i = 0; i < prevQuestions.Count; i++)
+                                        {
+                                            int questionNum = i + 1;
+                                            if (modifiedQuestionsDict.ContainsKey(questionNum))
+                                            {
+                                                patchedQuestions.Add(modifiedQuestionsDict[questionNum]);
+                                                Console.WriteLine($"[Debug] Patching question {questionNum}");
+                                            }
+                                            else
+                                            {
+                                                patchedQuestions.Add(BuildQuestionItemFromStoredJson(prevQuestions[i]));
+                                            }
+                                        }
+
+                                        if (additionalQuestionsList.Count > 0)
+                                        {
+                                            patchedQuestions.AddRange(additionalQuestionsList);
+                                        }
+
+                                        if (modifiedQuestionsDict.Count > 0)
+                                        {
+                                            foreach (var extraQuestion in modifiedQuestionsDict
+                                                .Where(pair => pair.Key > prevQuestions.Count)
+                                                .OrderBy(pair => pair.Key))
+                                            {
+                                                appendedQuestions.Add(extraQuestion);
+                                            }
+
+                                            if (appendedQuestions.Count > 0)
+                                            {
+                                                patchedQuestions.AddRange(appendedQuestions.Select(pair => pair.Value));
+                                            }
+                                        }
+
+                                        string title = "Đề thi";
+                                        string category = "Chung";
+                                        string level = "Trung cấp";
+                                        int timeLimit = 30;
+                                        double totalScore = 10.0;
+
+                                        if (prevDoc.RootElement.TryGetProperty("title", out var prevTitle)) title = prevTitle.GetString() ?? title;
+                                        if (prevDoc.RootElement.TryGetProperty("category", out var prevCat)) category = prevCat.GetString() ?? category;
+                                        if (prevDoc.RootElement.TryGetProperty("level", out var prevLevel)) level = prevLevel.GetString() ?? level;
+                                        if (prevDoc.RootElement.TryGetProperty("timeLimit", out var prevTL))
+                                        {
+                                            if (prevTL.ValueKind == JsonValueKind.Number) timeLimit = prevTL.GetInt32();
+                                            else if (prevTL.ValueKind == JsonValueKind.String && int.TryParse(prevTL.GetString(), out int tlVal)) timeLimit = tlVal;
+                                        }
+                                        if (prevDoc.RootElement.TryGetProperty("totalScore", out var prevTS))
+                                        {
+                                            if (prevTS.ValueKind == JsonValueKind.Number) totalScore = prevTS.GetDouble();
+                                            else if (prevTS.ValueKind == JsonValueKind.String && double.TryParse(prevTS.GetString(), out double tsVal)) totalScore = tsVal;
+                                        }
+
+                                        int totalAddedQuestions = additionalQuestionsList.Count + appendedQuestions.Count;
+                                        int totalModifiedQuestions = modifiedQuestionsDict.Count - appendedQuestions.Count;
+                                        string message = totalAddedQuestions > 0
+                                            ? $"Đã thêm {totalAddedQuestions} câu hỏi mới vào đề. Bạn có muốn chỉnh sửa thêm không?"
+                                            : $"Đã cập nhật {totalModifiedQuestions} câu hỏi. Bạn có muốn thay đổi thêm không?";
+                                        if (data.TryGetProperty("message", out var msgProp))
+                                        {
+                                            message = msgProp.GetString() ?? message;
+                                        }
+
+                                        aiText = message;
+                                        metadata = JsonSerializer.Serialize(new
+                                        {
+                                            intent = "create_exam",
+                                            title,
+                                            category,
+                                            level,
+                                            timeLimit,
+                                            totalScore,
+                                            questions = patchedQuestions,
+                                            message
+                                        });
+
+                                        var chatMsg = new ChatMessage
+                                        {
+                                            Username = User.Identity?.Name ?? "Admin",
+                                            UserMessage = request.Message,
+                                            AiResponse = aiText,
+                                            Metadata = metadata
+                                        };
+                                        _context.ChatMessages.Add(chatMsg);
+                                        await _context.SaveChangesAsync();
+
+                                        return Ok(new
+                                        {
+                                            intent = "create_exam",
+                                            hasDraft = true,
+                                            message = aiText,
+                                            title,
+                                            category,
+                                            level,
+                                            timeLimit,
+                                            totalScore,
+                                            questions = patchedQuestions
+                                        });
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"[Debug] Error patching modified questions: {ex.Message}");
                                 }
                             }
 
@@ -1102,7 +1152,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                             .FirstOrDefaultAsync() ?? "Chung";
                     }
 
-                    return await HandleCreateExam(category, level, count, count);
+                    return await HandleCreateExam(category, level, count, count, request.Message);
                 }
                 return Ok(new { message = "Xin lỗi, tôi gặp một chút trục trặc khi kết nối với bộ não AI. Vui lòng thử lại sau giây lát.", hasDraft = false });
             }
@@ -1120,6 +1170,16 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
             string msgLower = NormalizeForMatch(message);
             foreach (var kv in CategoryAliases)
             {
+                if (kv.Key == "C#")
+                {
+                    if (ContainsAlias(message, "c#") || ContainsAlias(message, "csharp") || ContainsAlias(message, "c sharp") || ContainsAlias(message, "dotnet") || ContainsAlias(message, ".net"))
+                    {
+                        category = kv.Key;
+                        break;
+                    }
+                    continue;
+                }
+
                 var keywords = kv.Value.Select(NormalizeForMatch).Where(k => !string.IsNullOrEmpty(k));
                 if (keywords.Any(k => msgLower.Contains(k, StringComparison.Ordinal)))
                 {
@@ -1174,7 +1234,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
             return result.Distinct().ToList();
         }
 
-        private async Task<IActionResult> HandleCreateExam(string category, string level, int count, int? requestedCount = null)
+        private async Task<IActionResult> HandleCreateExam(string category, string level, int count, int? requestedCount = null, string? userMessage = null)
         {
             var canonicalLevel = CanonicalizeLevel(level);
             var matchedQuestions = await GetMatchedActiveQuestions(category, canonicalLevel);
@@ -1235,20 +1295,53 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
 
             await _context.SaveChangesAsync();
 
+            var questionsForMetadata = randomQuestions.Select(q => {
+                var optionsList = new List<string>();
+                if (!string.IsNullOrEmpty(q.OptionA)) optionsList.Add(q.OptionA);
+                if (!string.IsNullOrEmpty(q.OptionB)) optionsList.Add(q.OptionB);
+                if (!string.IsNullOrEmpty(q.OptionC)) optionsList.Add(q.OptionC);
+                if (!string.IsNullOrEmpty(q.OptionD)) optionsList.Add(q.OptionD);
+                
+                return new {
+                    id = q.QuestionId,
+                    text = q.Content,
+                    type = optionsList.Count > 0 ? "Multiple Choice" : "Một câu hỏi ngắn",
+                    options = optionsList,
+                    answer = NormalizeAnswerChoice(q.CorrectOption, optionsList)
+                };
+            }).ToList();
+
+            var responseMessage = $"Tôi đã tạo xong đề thi {actualCount} câu cho chủ đề {category}. Bạn có thể xem bản thảo ở khung bên phải.";
+
+            var metadata = JsonSerializer.Serialize(new {
+                intent = "create_exam",
+                title = newExam.Title,
+                category = newExam.Category,
+                level = newExam.Level,
+                timeLimit = newExam.TimeLimit,
+                totalScore = newExam.TotalScore,
+                questions = questionsForMetadata,
+                message = responseMessage
+            });
+
+            var chatMsg = new ChatMessage {
+                Username = User.Identity?.Name ?? "Admin",
+                UserMessage = userMessage ?? $"Tạo đề thi {category} {level} {actualCount} câu",
+                AiResponse = responseMessage,
+                Metadata = metadata
+            };
+            _context.ChatMessages.Add(chatMsg);
+            await _context.SaveChangesAsync();
+
             return Ok(new { 
-                response = $"Tôi đã tạo xong đề thi {actualCount} câu cho chủ đề {category}. Bạn có thể xem bản thảo ở khung bên phải.",
+                response = responseMessage,
                 examId = newExam.ExamId,
                 title = newExam.Title,
                 category = newExam.Category,
+                level = newExam.Level,
                 timeLimit = newExam.TimeLimit,
                 totalScore = newExam.TotalScore,
-                questions = randomQuestions.Select(q => new {
-                    id = q.QuestionId,
-                    text = q.Content,
-                    type = "Multiple Choice",
-                    options = new[] { q.OptionA, q.OptionB, q.OptionC, q.OptionD },
-                    answer = q.CorrectOption
-                }),
+                questions = questionsForMetadata,
                 questionCountRequested = requestedCount ?? actualCount,
                 questionCountActual = actualCount,
                 questionCountAdjusted = requestedCount.HasValue && requestedCount.Value != actualCount,
