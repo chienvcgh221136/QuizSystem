@@ -523,6 +523,139 @@ namespace QuizApi.Controllers
             }).ToList();
         }
 
+        [HttpPost("tutor")]
+        public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
+        {
+            if (string.IsNullOrEmpty(request.Message))
+                return BadRequest("Tin nhắn không được để trống.");
+
+            string currentUsername = User.Identity?.Name ?? "User";
+            var history = await _context.ChatMessages
+                .Where(m => m.Username == currentUsername)
+                .OrderByDescending(m => m.SentAt)
+                .Take(20)
+                .OrderBy(m => m.SentAt)
+                .ToListAsync();
+
+            string examHistoryContext = "Học viên chưa làm bài thi nào.";
+            string wrongAnswersContext = "Chưa có dữ liệu câu sai gần đây.";
+            
+            try 
+            {
+                var recentExams = await (from er in _context.ExamResults
+                                         join u in _context.Users on er.UserId equals u.UserId
+                                         join ex in _context.Exams on er.ExamId equals ex.ExamId
+                                         where u.Username == currentUsername && er.Status == "Submitted"
+                                         orderby er.SubmitTime descending
+                                         select new { er.ResultId, Title = ex.Title, er.Score, ex.TotalScore, er.SubmitTime })
+                                         .Take(5)
+                                         .ToListAsync();
+
+                if (recentExams.Any())
+                {
+                    var historyLines = recentExams.Select(er => $"- Đề: {er.Title} | Điểm: {er.Score}/{er.TotalScore} | Nộp lúc: {er.SubmitTime}");
+                    examHistoryContext = string.Join("\n", historyLines);
+
+                    // Lấy danh sách ID của TẤT CẢ 5 bài thi này
+                    var recentResultIds = recentExams.Select(e => e.ResultId).ToList();
+
+                    // Lấy thô lỗi sai của CẢ 5 BÀI THI gần nhất, phân loại theo từng đề thi
+                    var wrongAnswersRaw = await (from ua in _context.UserAnswers
+                                              join q in _context.QuestionBank on ua.QuestionId equals q.QuestionId
+                                              join er in _context.ExamResults on ua.ResultId equals er.ResultId
+                                              join ex in _context.Exams on er.ExamId equals ex.ExamId
+                                              where recentResultIds.Contains(ua.ResultId) 
+                                                    && ua.SelectedOption != q.CorrectOption 
+                                              select new {
+                                                  ExamTitle = ex.Title,
+                                                  q.Content,
+                                                  ua.SelectedOption,
+                                                  q.CorrectOption,
+                                                  OptionA = q.OptionA ?? "(Không có nội dung)",
+                                                  OptionB = q.OptionB ?? "(Không có nội dung)",
+                                                  OptionC = q.OptionC ?? "(Không có nội dung)",
+                                                  OptionD = q.OptionD ?? "(Không có nội dung)"
+                                              })
+                                              .ToListAsync();
+
+                    if (wrongAnswersRaw.Any()) {
+                        var formattedWrongs = new List<string>();
+                        
+                        // Gom nhóm lỗi sai theo Từng Đề Thi
+                        var groupedWrongs = wrongAnswersRaw.GroupBy(w => w.ExamTitle);
+                        
+                        foreach(var group in groupedWrongs)
+                        {
+                            formattedWrongs.Add($"\n[ĐỀ THI: {group.Key.ToUpper()}]");
+                            int i = 1;
+                            
+                            // Lấy tối đa 5 câu sai MỖI ĐỀ 
+                            foreach(var item in group.Take(5))
+                            {
+                                string GetOptionText(string? opt) {
+                                    return (opt?.ToUpper().Trim()) switch {
+                                        "A" => item.OptionA,
+                                        "B" => item.OptionB,
+                                        "C" => item.OptionC,
+                                        "D" => item.OptionD,
+                                        _ => "(Bỏ trống)"
+                                    };
+                                }
+                                string userChoice = GetOptionText(item.SelectedOption);
+                                string correctChoice = GetOptionText(item.CorrectOption);
+                                
+                                formattedWrongs.Add($"- CÂU HỎI {i}: \"{item.Content}\"\n  + Học viên chọn ({item.SelectedOption ?? "Trống"}): \"{userChoice}\"\n  + Đáp án đúng ({item.CorrectOption}): \"{correctChoice}\"");
+                                i++;
+                            }
+                        }
+                        wrongAnswersContext = string.Join("\n", formattedWrongs);
+                    } else {
+                        wrongAnswersContext = "Bài thi gần nhất học viên làm đúng 100% hoặc hệ thống chưa ghi nhận lỗi sai.";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Lỗi RAG Dữ liệu thi]: {ex.Message}");
+            }  
+
+            string systemPrompt = $@"You are 'Gia sư AI' (AI Tutor) for QuizChat.
+You help students with their studies, answer their questions clearly and concisely in Vietnamese.
+Do NOT generate JSON. Provide helpful, friendly plain-text responses to the user's questions.
+Keep answers relatively short and well-formatted with markdown.
+
+--- CONTEXT LỊCH SỬ HỌC VIÊN ---
+Lịch sử bài thi gần đây:
+{examHistoryContext}
+
+Những câu sai cần lưu ý:
+{wrongAnswersContext}
+--------------------------------
+Dựa vào lịch sử trên, hãy đưa ra tư vấn cá nhân hóa (nếu phù hợp) để giúp học viên cải thiện.";
+
+            try
+            {
+                var aiRawResponse = await _groqService.ChatAsync(systemPrompt, history, request.Message);
+                
+                var chatMsg = new ChatMessage
+                {
+                    Username = currentUsername,
+                    UserMessage = request.Message,
+                    AiResponse = aiRawResponse,
+                    SentAt = DateTime.UtcNow
+                };
+                _context.ChatMessages.Add(chatMsg);
+                await _context.SaveChangesAsync();
+
+                return Ok(new { message = aiRawResponse });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Error] AI Tutor: {ex.Message}");
+                return StatusCode(500, new { message = "Xin lỗi, kết nối mạng đang gián đoạn. Vui lòng thử lại." });
+            }
+        }
+
         [HttpPost("ask")]
         public async Task<IActionResult> Ask([FromBody] ChatRequest request)
         {
