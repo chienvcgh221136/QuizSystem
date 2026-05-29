@@ -15,6 +15,11 @@ namespace QuizApi.Models
         public string? OptionD { get; set; }
         public string CorrectOption { get; set; } = "A";
         public string? Explanation { get; set; }
+        /// <summary>
+        /// Đường dẫn tương đối đến ảnh đính kèm câu hỏi (nếu có).
+        /// Ví dụ: /uploads/question-images/q_img_20240528_001.jpg
+        /// </summary>
+        public string? ImageUrl { get; set; }
         public double ScorePerQuestion { get; set; } = 1.0;
         public bool IsActive { get; set; } = true;
         public DateTime CreatedAt { get; set; } = DateTime.Now;

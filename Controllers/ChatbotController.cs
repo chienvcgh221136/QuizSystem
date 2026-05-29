@@ -5,6 +5,7 @@ using QuizApi.Models;
 using QuizApi.Services;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Globalization;
 using System.Text;
@@ -21,6 +22,7 @@ namespace QuizApi.Controllers
     {
         private readonly GroqService _groqService;
         private readonly QuizDbContext _context;
+        private readonly FileParserService _fileParserService;
         private static readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions
         {
             Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.All)
@@ -84,10 +86,11 @@ namespace QuizApi.Controllers
             { "Cao cấp", new[] { "cao cấp", "cao cap", "khó", "kho", "advanced", "hard" } },
         };
 
-        public ChatbotController(GroqService groqService, QuizDbContext context)
+        public ChatbotController(GroqService groqService, QuizDbContext context, FileParserService fileParserService)
         {
             _groqService = groqService;
             _context = context;
+            _fileParserService = fileParserService;
         }
 
         private static string RepairTruncatedJson(string json)
@@ -523,8 +526,11 @@ namespace QuizApi.Controllers
         [HttpPost("ask")]
         public async Task<IActionResult> Ask([FromBody] ChatRequest request)
         {
-            if (string.IsNullOrEmpty(request.Message))
+            if (string.IsNullOrEmpty(request.Message) && string.IsNullOrEmpty(request.FileContent))
                 return BadRequest("Tin nhắn không được để trống.");
+            // Nếu chỉ có file mà không có message, tự thêm lệnh mặc định
+            if (string.IsNullOrEmpty(request.Message))
+                request.Message = "Hãy tạo đề thi từ nội dung tài liệu đính kèm.";
 
             string userMsg = request.Message.ToLower();
             bool isExamRequest = userMsg.Contains("tạo đề") || userMsg.Contains("soạn đề") || userMsg.Contains("generate exam") || userMsg.Contains("create exam") || userMsg.Contains("đề thi") || userMsg.Contains("quiz");
@@ -536,6 +542,11 @@ namespace QuizApi.Controllers
                 .Select(g => new { Category = g.Key, Count = g.Count() })
                 .ToListAsync();
             string dbStats = string.Join(", ", stats.Select(s => $"{s.Category}: {s.Count} câu"));
+            // Nếu có file đính kèm, ghi chú rõ để AI không dựa vào DB
+            if (!string.IsNullOrWhiteSpace(request.FileContent))
+            {
+                dbStats = dbStats + " [CHÚ Ý: Người dùng đã đính kèm tài liệu - BỎ QUA database stats, tạo câu hỏi HOÀN TOÀN từ nội dung tài liệu đính kèm]";  
+            }
 
             string currentUsername = User.Identity?.Name ?? "Admin";
             var history = await _context.ChatMessages
@@ -578,8 +589,8 @@ namespace QuizApi.Controllers
             }
             int previousExamQuestionLimit = (isExamModificationRequest && requestedQuestionCount.GetValueOrDefault() > 0 && requestedQuestionIndexes.Count == 0) ? 2 : 3;
             string? compactPreviousExamContext = BuildCompactPreviousExamContext(previousExamMetadata, requestedQuestionIndexes, previousExamQuestionLimit);
-            // If the user explicitly requested to "tạo đề" / create an exam, use DB-only flow and do not call AI.
-            if (isExamRequest)
+            // If the user explicitly requested to "tạo đề" / create an exam AND NO FILE IS ATTACHED, use DB-only flow and do not call AI.
+            if (isExamRequest && string.IsNullOrWhiteSpace(request.FileContent))
             {
                 var (categoryLocal, countLocal, levelLocal) = ParseExamIntentLocally(request.Message);
                 if (string.IsNullOrEmpty(categoryLocal))
@@ -592,8 +603,19 @@ namespace QuizApi.Controllers
                 return await HandleCreateExam(categoryLocal, levelLocal, countLocal, countLocal, request.Message);
             }
 
+            // Lấy danh sách category thực tế từ DB để đưa vào prompt
+            var allowedCategories = await _context.QuestionBank
+                .Where(q => !string.IsNullOrEmpty(q.Category))
+                .Select(q => q.Category)
+                .Distinct()
+                .ToListAsync();
+            string allowedCategoriesStr = allowedCategories.Count > 0
+                ? string.Join(", ", allowedCategories.Select(c => $"\"{c}\""))
+                : "\"Chung\"";
+
             string systemPrompt = $@"You are the 'QuizChat Local AI Tutor'.
 CURRENT DATABASE STATS: {dbStats}
+ALLOWED CATEGORIES (MANDATORY - use EXACTLY one of these for the ""category"" field): [{allowedCategoriesStr}]
 
 STRICT RULES:
 1. You are an expert in the categories listed above. 
@@ -613,6 +635,7 @@ STRICT RULES:
 9. PROACTIVE SUGGESTION RULE: Whenever you generate or modify an exam (intent: ""create_exam""), the ""message"" property in your JSON MUST ALWAYS end with a friendly question in Vietnamese asking the user if they want to modify a specific question, change the difficulty, or randomize a completely new set of questions. (Example: ""Bạn có muốn thay đổi câu hỏi nào không, hoặc tạo một đề thi khác?"").
 10. NO MARKDOWN: Output ONLY raw JSON text. DO NOT wrap the response in ```json or any markdown formatting.
 11. MODIFICATION WITHOUT FULL REGEN: If user only wants to modify 1 or a few specific questions (e.g., ""sửa câu 1"", ""thay đổi câu 2 và 3""), do NOT regenerate the entire exam. Instead, return ONLY the specific modified question(s) with their new content. The backend will handle patching them back into the full exam automatically.
+12. DOCUMENT CONTEXT RULE: If a DOCUMENT_CONTEXT section is provided below, use its content as the primary source of knowledge for generating exam questions. Questions MUST be based on and derived from the document content. Treat the document as the study material.
 
 JSON OUTPUT FORMAT:
 If creating a NEW exam:
@@ -639,6 +662,29 @@ If modifying specific question(s) only:
 }}
 If just chatting:
 {{ ""message"": ""Your response."" }}";
+
+            // Đưa nội dung tài liệu vào system prompt nếu user gửi kèm file
+            if (!string.IsNullOrWhiteSpace(request.FileContent))
+            {
+                var truncatedFileContent = request.FileContent.Length > 30000
+                    ? request.FileContent.Substring(0, 30000) + "\n...[Nội dung tài liệu bị cắt bớt do quá dài]"
+                    : request.FileContent;
+                systemPrompt += $@"
+
+DOCUMENT_CONTEXT (Tệp đính kèm: {request.FileName ?? "tài liệu"}):
+---BEGIN DOCUMENT---
+{truncatedFileContent}
+---END DOCUMENT---
+
+DOCUMENT PROCESSING RULES (ĐỌC KỸ - BẮT BUỘC TUÂN THỦ):
+1. EXTRACT QUESTIONS: Đọc toàn bộ nội dung tài liệu, trích xuất tất cả các câu hỏi/bài tập.
+2. ANSWERS FROM USER MESSAGE: Nếu tài liệu KHÔNG có đáp án, hãy đọc tin nhắn của người dùng để tìm đáp án bổ sung. Ví dụ: người dùng có thể cung cấp ""Đáp án: 1-A, 2-C, 3-B..."" hoặc ""Câu 1: A, Câu 2: D..."".
+3. LEVEL FROM USER MESSAGE: Nếu tài liệu KHÔNG xác định độ khó, đọc tin nhắn của người dùng để lấy level (""sơ cấp"", ""trung cấp"", ""cao cấp""). Nếu không có, mặc định là ""Trung cấp"".
+4. INFER MISSING ANSWERS: Nếu cả tài liệu lẫn tin nhắn đều không có đáp án, hãy tự suy luận đáp án đúng dựa vào nội dung câu hỏi và các lựa chọn.
+5. MERGE INFORMATION: Kết hợp thông tin từ TÀI LIỆU (câu hỏi, lựa chọn) + TIN NHẮN NGƯỜI DÙNG (đáp án, level, số câu cần tạo) để tạo đề thi hoàn chỉnh.
+6. FORMAT OPTIONS: Nếu tài liệu có câu hỏi nhưng không có 4 lựa chọn A/B/C/D, hãy TỰ TẠO các lựa chọn phù hợp dựa trên nội dung câu hỏi.
+7. ALL QUESTIONS FROM DOCUMENT: Tất cả câu hỏi trong JSON phải được lấy/dựa trên nội dung tài liệu, không được tự nghĩ câu hỏi mới trừ khi người dùng yêu cầu thêm câu.";
+            }
 
                         if (!string.IsNullOrEmpty(compactPreviousExamContext))
                         {
@@ -693,7 +739,27 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
 
             try
             {
-                var aiRawResponse = await _groqService.ChatAsync(systemPrompt, compactHistory, request.Message);
+                // Khi có file đính kèm, đưa nội dung file TRỰC TIẾP vào phần user message
+                // thay vì chỉ để trong system prompt (AI sẽ chắc chắn đọc được)
+                string userMessageForGroq = request.Message;
+                if (!string.IsNullOrWhiteSpace(request.FileContent))
+                {
+                    var truncatedContent = request.FileContent.Length > 28000
+                        ? request.FileContent.Substring(0, 28000) + "\n...[Nội dung bị cắt bớt]"
+                        : request.FileContent;
+
+                    var fileName = request.FileName ?? "tài liệu";
+                    userMessageForGroq =
+                        $"[NỘI DUNG TÀI LIỆU ĐỀ THI - Tệp: {fileName}]\n" +
+                        "---\n" +
+                        truncatedContent + "\n" +
+                        "---\n\n" +
+                        "[YÊU CẦU CỦA NGƯỜI DÙNG]:\n" +
+                        request.Message + "\n\n" +
+                        "LƯU Ý: Hãy trích xuất câu hỏi từ tài liệu trên. Nếu người dùng cung cấp đáp án trong phần YÊU CẦU, hãy sử dụng đáp án đó. Tạo JSON đề thi với intent \"create_exam\".";
+                }
+
+                var aiRawResponse = await _groqService.ChatAsync(systemPrompt, compactHistory, userMessageForGroq);
                 string aiText = aiRawResponse;
                 bool hasDraft = false;
                 string? metadata = null;
@@ -715,8 +781,38 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
 
                             string category = "Chung";
                             if (data.TryGetProperty("category", out var catProp)) category = catProp.GetString() ?? category;
-                            // Normalize category AI trả về về canonical key (C#, .NET Core, IT...)
+                            // Resolve canonical (hardcoded aliases)
                             category = ResolveCanonicalCategory(category) ?? category;
+                            // Bắt buộc phải map vào category có sẵn trong DB — không tạo mới
+                            var dbCategories = await _context.QuestionBank
+                                .Where(q => !string.IsNullOrEmpty(q.Category))
+                                .Select(q => q.Category)
+                                .Distinct()
+                                .ToListAsync();
+                            if (dbCategories.Count > 0)
+                            {
+                                // 1. Exact match (case-insensitive)
+                                var exactMatch = dbCategories.FirstOrDefault(c =>
+                                    string.Equals(c, category, StringComparison.OrdinalIgnoreCase));
+                                if (exactMatch != null)
+                                {
+                                    category = exactMatch;
+                                }
+                                else
+                                {
+                                    // 2. Canonical match qua IsCategoryMatch
+                                    var canonicalMatch = dbCategories.FirstOrDefault(c => IsCategoryMatch(c, category));
+                                    if (canonicalMatch != null)
+                                    {
+                                        category = canonicalMatch;
+                                    }
+                                    else
+                                    {
+                                        // 3. Fallback: category đầu tiên trong DB (không để sinh mới)
+                                        category = dbCategories.First();
+                                    }
+                                }
+                            }
 
                             string level = "Sơ cấp";
                             if (data.TryGetProperty("level", out var levelProp)) {
@@ -761,7 +857,8 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                             var validQuestionsList = new List<Dictionary<string, object>>();
                             // If user explicitly requested a number of questions, prefer using existing DB questions of the same level
                             // when enough are available. This avoids AI generating off-level or low-quality questions.
-                            if (requestedCount > 0)
+                            // SKIP this DB-first path if user attached a file - always use AI-generated questions from the document.
+                            if (requestedCount > 0 && string.IsNullOrWhiteSpace(request.FileContent))
                             {
                                 var canonicalLevel = CanonicalizeLevel(level);
                                 var dbCount = (await GetMatchedActiveQuestions(category, canonicalLevel)).Count;
@@ -775,7 +872,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                             }
                             // Chỉ dùng câu hỏi từ AI nếu DB chưa đủ số lượng cần thiết
                             // (tránh trộn câu hỏi sai chủ đề do AI sinh ra)
-                            bool dbAlreadyFulfilled = requestedCount > 0 && validQuestionsList.Count >= requestedCount;
+                            bool dbAlreadyFulfilled = requestedCount > 0 && string.IsNullOrWhiteSpace(request.FileContent) && validQuestionsList.Count >= requestedCount;
                             if (!dbAlreadyFulfilled && data.TryGetProperty("questions", out var questionsProp) && questionsProp.ValueKind == JsonValueKind.Array) {
                                 foreach (var qElem in questionsProp.EnumerateArray()) {
                                     try {
@@ -798,8 +895,16 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                 }
                                 else if (validQuestionsList.Count < requestedCount)
                                 {
-                                    // Not enough AI-provided questions; fallback to DB-created exam which will pull DB questions filtered by level
-                                    return await HandleCreateExam(category, level, requestedCount, requestedCount, request.Message);
+                                    // Nếu có file đính kèm, dùng câu AI đã sinh dù thiếu (không fallback DB)
+                                    if (!string.IsNullOrWhiteSpace(request.FileContent))
+                                    {
+                                        // Giữ nguyên những câu AI sinh từ file
+                                    }
+                                    else
+                                    {
+                                        // Not enough AI-provided questions; fallback to DB-created exam
+                                        return await HandleCreateExam(category, level, requestedCount, requestedCount, request.Message);
+                                    }
                                 }
                             }
 
@@ -807,6 +912,16 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                             if (questionCountRequested > 0 && questionCountActual != questionCountRequested)
                             {
                                 questionCountAdjusted = true;
+                            }
+
+                            // Assign ảnh Cloudinary vào câu hỏi theo thứ tự (ảnh PDF xuất hiện theo vị trí)
+                            if (request.ImageUrls != null && request.ImageUrls.Count > 0 && !string.IsNullOrWhiteSpace(request.FileContent))
+                            {
+                                int imgIdx = 0;
+                                for (int qi = 0; qi < validQuestionsList.Count && imgIdx < request.ImageUrls.Count; qi++)
+                                {
+                                    validQuestionsList[qi]["imageUrl"] = request.ImageUrls[imgIdx++];
+                                }
                             }
 
                             if (isExamModificationRequest && !string.IsNullOrEmpty(previousExamMetadata))
@@ -1296,6 +1411,16 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
 
             if (matchedQuestions.Count == 0)
             {
+                // Kiểm tra xem có phải do thiếu độ khó không
+                var categoryQuestions = await _context.QuestionBank
+                    .Where(q => q.IsActive == true)
+                    .ToListAsync();
+                bool hasCategory = categoryQuestions.Any(q => IsCategoryMatch(q.Category, category));
+
+                if (hasCategory)
+                {
+                    return Ok(new { response = $"Tôi xin lỗi, hiện tại trong kho không có câu hỏi nào thuộc chủ đề '{category}' ở độ khó '{canonicalLevel}'." });
+                }
                 return Ok(new { response = $"Tôi xin lỗi, hiện tại trong kho không có câu hỏi nào thuộc chủ đề '{category}'." });
             }
 
@@ -1406,10 +1531,117 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                 intent = "create_exam"
             });
         }
+        [HttpPost("upload-file")]
+        [Consumes("multipart/form-data")]
+        public async Task<IActionResult> UploadFile(
+            IFormFile file,
+            [FromServices] CloudinaryService cloudinary)
+        {
+            if (file == null || file.Length == 0)
+                return BadRequest(new { message = "Vui lòng chọn tệp để tải lên." });
+
+            var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+            if (ext != ".pdf" && ext != ".docx")
+                return BadRequest(new { message = "Chỉ hỗ trợ tệp .pdf hoặc .docx." });
+
+            if (file.Length > 20 * 1024 * 1024)
+                return BadRequest(new { message = "Tệp quá lớn. Kích thước tối đa là 20MB." });
+
+            try
+            {
+                // 1. Extract text (cho chatbot AI)
+                string extractedText;
+                using (var stream = file.OpenReadStream())
+                {
+                    if (ext == ".pdf")
+                        extractedText = await _fileParserService.ExtractTextFromPdfAsync(stream);
+                    else
+                        extractedText = await _fileParserService.ExtractTextFromDocxAsync(stream);
+                }
+
+                // 2. Extract ảnh nhúng (song song, không fail nếu lỗi)
+                var imageUrls = new List<string>();
+                try
+                {
+                    QuizApi.Services.DocumentWithImages parsed;
+                    using (var stream2 = file.OpenReadStream())
+                    {
+                        parsed = ext == ".pdf"
+                            ? await _fileParserService.ExtractTextAndImagesFromPdfAsync(stream2)
+                            : await _fileParserService.ExtractTextAndImagesFromDocxAsync(stream2);
+                    }
+
+                    // Upload từng ảnh lên Cloudinary
+                    foreach (var (key, base64) in parsed.Images)
+                    {
+                        try
+                        {
+                            var publicId = $"chatbot_{DateTime.UtcNow.Ticks}_{key.ToLower()}";
+                            var cdnUrl   = await cloudinary.UploadBase64Async(base64, "chatbot-images", publicId);
+                            imageUrls.Add(cdnUrl);
+                        }
+                        catch { /* bỏ qua ảnh lỗi */ }
+                    }
+                }
+                catch { /* không có ảnh hoặc không extract được — không sao */ }
+
+                if (string.IsNullOrWhiteSpace(extractedText) && imageUrls.Count == 0)
+                    return BadRequest(new { message = "Không thể trích xuất nội dung từ tệp này. Tệp có thể bị bảo vệ hoặc rỗng." });
+
+                // Nếu PDF scan (không có text nhưng có ảnh), tạo text mô tả
+                if (string.IsNullOrWhiteSpace(extractedText))
+                    extractedText = $"[File có {imageUrls.Count} hình ảnh đính kèm, vui lòng dùng tính năng Import trong trang Ngân hàng câu hỏi để đọc ảnh chính xác hơn]";
+
+                return Ok(new
+                {
+                    fileName  = file.FileName,
+                    text      = extractedText,
+                    charCount = extractedText.Length,
+                    imageUrls // mảng URL Cloudinary
+                });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[UploadFile Error] {ex.Message}");
+                return StatusCode(500, new { message = "Lỗi khi xử lý tệp tải lên." });
+            }
+        }
+
+
+        [HttpDelete("history")]
+        public async Task<IActionResult> ClearHistory()
+        {
+            try
+            {
+                string currentUsername = User.Identity?.Name ?? "Admin";
+                var history = await _context.ChatMessages
+                    .Where(m => m.Username == currentUsername)
+                    .ToListAsync();
+
+                if (history.Any())
+                {
+                    _context.ChatMessages.RemoveRange(history);
+                    await _context.SaveChangesAsync();
+                }
+
+                return Ok(new { message = "Đã xóa dữ liệu trò chuyện thành công." });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Lỗi khi xóa lịch sử trò chuyện.", error = ex.Message });
+            }
+        }
     }
 
     public class ChatRequest
     {
         public string? Message { get; set; }
+        public string? FileContent { get; set; }
+        public string? FileName { get; set; }
+        public List<string>? ImageUrls { get; set; }  // URLs Cloudinary ảnh từ file
     }
 }

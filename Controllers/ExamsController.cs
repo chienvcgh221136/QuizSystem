@@ -2,9 +2,14 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 using QuizApi.Models;
+using QuizApi.Services;
 
 namespace QuizApi.Controllers
 {
@@ -19,6 +24,7 @@ namespace QuizApi.Controllers
         public string Type { get; set; } = "Multiple Choice";
         public List<string> Options { get; set; } = new();
         public string Answer { get; set; } = string.Empty;
+        public string? ImageUrl { get; set; }  // URL Cloudinary hoặc đường dẫn ảnh
     }
 
     public class CreateFullExamRequest
@@ -40,10 +46,16 @@ namespace QuizApi.Controllers
     public class ExamsController : ControllerBase
     {
         private readonly QuizDbContext _context;
+        private readonly FileParserService _fileParser;
+        private readonly GroqService _groqService;
+        private readonly CloudinaryService _cloudinary;
 
-        public ExamsController(QuizDbContext context)
+        public ExamsController(QuizDbContext context, FileParserService fileParser, GroqService groqService, CloudinaryService cloudinary)
         {
-            _context = context;
+            _context    = context;
+            _fileParser = fileParser;
+            _groqService = groqService;
+            _cloudinary  = cloudinary;
         }
 
         private static string NormalizeForMatch(string? s)
@@ -143,8 +155,10 @@ namespace QuizApi.Controllers
                                            optionB = q.OptionB,
                                            optionC = q.OptionC,
                                            optionD = q.OptionD,
+                                           correctOption = q.CorrectOption,
                                            scorePerQuestion = q.ScorePerQuestion,
-                                           orderIndex = eq.OrderIndex
+                                           orderIndex = eq.OrderIndex,
+                                           imageUrl = q.ImageUrl
                                        }).ToListAsync();
 
                 return Ok(new
@@ -190,11 +204,35 @@ namespace QuizApi.Controllers
                 // Tự động gán câu hỏi nếu có QuestionCount
                 if (request.QuestionCount.HasValue && request.QuestionCount.Value > 0)
                 {
-                    var randomQuestions = await _context.QuestionBank
-                        .Where(q => q.Category == newExam.Category && q.Level == newExam.Level)
-                        .OrderBy(r => Guid.NewGuid())
-                        .Take(request.QuestionCount.Value)
+                    // Load toàn bộ câu active, filter in-memory để dùng case-insensitive
+                    var allActive = await _context.QuestionBank
+                        .Where(q => q.IsActive == true)
                         .ToListAsync();
+
+                    var catNorm = (newExam.Category ?? "").Trim().ToLowerInvariant();
+                    var lvlNorm = (newExam.Level ?? "").Trim().ToLowerInvariant();
+
+                    // 1. Ưu tiên đúng cả category + level
+                    var matched = allActive
+                        .Where(q =>
+                            (q.Category ?? "").Trim().ToLowerInvariant() == catNorm &&
+                            (q.Level ?? "").Trim().ToLowerInvariant() == lvlNorm)
+                        .ToList();
+
+                    // 2. Fallback: đúng category, bất kỳ level
+                    if (matched.Count < request.QuestionCount.Value)
+                    {
+                        var anyLevel = allActive
+                            .Where(q => (q.Category ?? "").Trim().ToLowerInvariant() == catNorm &&
+                                        !matched.Any(m => m.QuestionId == q.QuestionId))
+                            .ToList();
+                        matched.AddRange(anyLevel);
+                    }
+
+                    var randomQuestions = matched
+                        .OrderBy(_ => Guid.NewGuid())
+                        .Take(request.QuestionCount.Value)
+                        .ToList();
 
                     for (int i = 0; i < randomQuestions.Count; i++)
                     {
@@ -426,14 +464,37 @@ namespace QuizApi.Controllers
                     return NotFound(new { message = "Không tìm thấy đề thi để xóa." });
                 }
 
-                var examQuestions = await _context.ExamQuestions.Where(eq => eq.ExamId == id).ToListAsync();
-                if (examQuestions.Any())
+                // 1. Xóa UserAnswers liên quan đến các ExamResult của đề này
+                var resultIds = await _context.ExamResults
+                    .Where(r => r.ExamId == id)
+                    .Select(r => r.ResultId)
+                    .ToListAsync();
+
+                if (resultIds.Any())
                 {
-                    _context.ExamQuestions.RemoveRange(examQuestions);
+                    var userAnswers = await _context.UserAnswers
+                        .Where(a => resultIds.Contains(a.ResultId))
+                        .ToListAsync();
+                    if (userAnswers.Any())
+                        _context.UserAnswers.RemoveRange(userAnswers);
+
+                    // 2. Xóa ExamResults
+                    var examResults = await _context.ExamResults
+                        .Where(r => resultIds.Contains(r.ResultId))
+                        .ToListAsync();
+                    _context.ExamResults.RemoveRange(examResults);
                 }
 
+                // 3. Xóa ExamQuestions
+                var examQuestions = await _context.ExamQuestions
+                    .Where(eq => eq.ExamId == id)
+                    .ToListAsync();
+                if (examQuestions.Any())
+                    _context.ExamQuestions.RemoveRange(examQuestions);
+
+                // 4. Xóa Exam
                 _context.Exams.Remove(exam);
-                
+
                 await _context.SaveChangesAsync();
 
                 return Ok(new { message = "Xóa đề thi và các liên kết thành công." });
@@ -513,6 +574,7 @@ namespace QuizApi.Controllers
                         OptionD = qReq.Options.Count > 3 ? qReq.Options[3] : "",
                         CorrectOption = sanitizedAnswer,
                         ScorePerQuestion = (double)request.TotalScore / request.Questions.Count,
+                        ImageUrl = qReq.ImageUrl,  // Lưu URL ảnh Cloudinary
                         CreatedAt = DateTime.Now
                     };
 
@@ -556,5 +618,384 @@ namespace QuizApi.Controllers
                 return StatusCode(500, new { message = "Lỗi khi lưu bộ đề đầy đủ.", error = ex.Message, innerError = innerMsg });
             }
         }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // VISION PARSING: Chuyển PDF/Word thành JSON câu hỏi qua AI Vision
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// POST /api/Exams/parse-vision
+        /// Upload một file PDF hoặc Word, trả về danh sách câu hỏi dạng JSON
+        /// được trích xuất và OCR bằng Groq Vision AI.
+        /// </summary>
+        [HttpPost("parse-vision")]
+        [Authorize(Roles = "Admin")]
+        public async Task<IActionResult> ParseDocumentWithVision(IFormFile file)
+        {
+            if (file == null || file.Length == 0)
+                return BadRequest(new { message = "Vui lòng upload một file PDF hoặc Word (.docx)." });
+
+            var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
+            if (extension != ".pdf" && extension != ".docx")
+                return BadRequest(new { message = "Chỉ hỗ trợ file .pdf hoặc .docx." });
+
+            try
+            {
+                // 1. Trích xuất từng trang thành ảnh Base64
+                ParsedDocument parsed;
+                using (var stream = file.OpenReadStream())
+                {
+                    parsed = extension == ".pdf"
+                        ? await _fileParser.ExtractFromPdfAsync(stream)
+                        : await _fileParser.ExtractFromDocxAsync(stream);
+                }
+
+                if (parsed.TotalPages == 0)
+                    return BadRequest(new { message = "Không thể đọc nội dung từ file. File có thể bị hỏng hoặc rỗng." });
+
+                // 2. System Prompt chi tiết cho AI Vision
+                const string systemPrompt = @"
+Bạn là một chuyên gia trích xuất và cấu trúc hóa dữ liệu đề thi.
+Bên dưới là ảnh chụp từng trang của một đề thi. Hãy đọc toàn bộ nội dung, nhận dạng từng câu hỏi trắc nghiệm và trả về dữ liệu theo định dạng JSON mảng sau:
+
+[
+  {
+    ""Text"": ""Nội dung đầy đủ của câu hỏi (bao gồm cả đoạn văn, biểu đồ mô tả bằng text nếu có)"",
+    ""Options"": [""Phương án A"", ""Phương án B"", ""Phương án C"", ""Phương án D""],
+    ""Answer"": ""A""
+  }
+]
+
+Quy tắc bắt buộc:
+- Chỉ trả về JSON thuần, không thêm bất kỳ giải thích nào trước hoặc sau.
+- Trường Answer phải là một trong các giá trị: A, B, C, hoặc D.
+- Nếu đáp án không rõ ràng trong ảnh, hãy đặt Answer là ""A"".
+- Nếu câu hỏi có công thức toán học, hãy dùng ký hiệu LaTeX inline (e.g., $x^2 + y^2$).
+- Nếu câu hỏi liên quan đến sơ đồ/hình ảnh không có mô tả chữ, hãy mô tả ngắn gọn nội dung hình ảnh đó trong trường Text.
+- Bỏ qua các phần như tiêu đề đề thi, thời gian, họ tên thí sinh.
+";
+
+                // 3. Chia nhỏ ảnh thành các chunk (tối đa 4 trang/request) để tránh overload API
+                const int chunkSize = 4;
+                var allQuestions = new List<JsonElement>();
+                var pageImages = parsed.PageImages;
+
+                for (int i = 0; i < pageImages.Count; i += chunkSize)
+                {
+                    var chunk = pageImages.Skip(i).Take(chunkSize).ToList();
+                    var chunkPrompt = pageImages.Count > chunkSize
+                        ? $"{systemPrompt}\n\n[Đây là trang {i + 1} đến {Math.Min(i + chunkSize, pageImages.Count)} trong tổng số {pageImages.Count} trang. Chỉ trích xuất câu hỏi từ các trang này.]"
+                        : systemPrompt;
+
+                    var rawResponse = await _groqService.ChatWithVisionAsync(chunkPrompt, chunk);
+
+                    // Parse JSON từ response của AI
+                    var cleanedJson = ExtractJsonArray(rawResponse);
+                    if (!string.IsNullOrEmpty(cleanedJson))
+                    {
+                        try
+                        {
+                            using var chunkDoc = JsonDocument.Parse(cleanedJson);
+                            if (chunkDoc.RootElement.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var element in chunkDoc.RootElement.EnumerateArray())
+                                {
+                                    allQuestions.Add(element.Clone());
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            // Bỏ qua chunk parse lỗi, tiếp tục xử lý các chunk còn lại
+                        }
+                    }
+                }
+
+                return Ok(new
+                {
+                    message = $"Đã trích xuất thành công {allQuestions.Count} câu hỏi từ {parsed.TotalPages} trang.",
+                    totalPages = parsed.TotalPages,
+                    totalQuestions = allQuestions.Count,
+                    questions = allQuestions
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Lỗi khi xử lý file với Vision AI.", error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Tìm và trích xuất mảng JSON đầu tiên trong chuỗi text có thể chứa markdown code fence.
+        /// </summary>
+        private static string ExtractJsonArray(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+
+            // Loại bỏ markdown code fence nếu AI trả về ```json ... ```
+            var start = text.IndexOf('[');
+            var end = text.LastIndexOf(']');
+
+            if (start >= 0 && end > start)
+                return text.Substring(start, end - start + 1);
+
+            return string.Empty;
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // SMART VISION PARSING: Trích xuất ảnh riêng lẻ + gắn đúng vị trí
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// POST /api/Exams/parse-vision-smart
+        /// Upload PDF/Word → trích xuất text có placeholder [IMG_X] + ảnh riêng lẻ
+        /// → Gửi text + ảnh lên Groq Vision → AI trả về câu hỏi JSON
+        /// → Lưu ảnh vào disk → gắn ImageUrl đúng cho từng câu hỏi
+        /// </summary>
+        [HttpPost("parse-vision-smart")]
+        [Authorize(Roles = "Admin")]
+        public async Task<IActionResult> ParseDocumentWithVisionSmart(
+            IFormFile file,
+            [FromServices] IWebHostEnvironment env)
+        {
+            if (file == null || file.Length == 0)
+                return BadRequest(new { message = "Vui lòng upload một file PDF hoặc Word (.docx)." });
+
+            var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
+            if (extension != ".pdf" && extension != ".docx")
+                return BadRequest(new { message = "Chỉ hỗ trợ file .pdf hoặc .docx." });
+
+            var uploadsDir = Path.Combine(
+                env.WebRootPath ?? Path.Combine(Directory.GetCurrentDirectory(), "wwwroot"),
+                "uploads", "question-images");
+            Directory.CreateDirectory(uploadsDir); // vẫn giữ folder cũ phòng fallback
+
+            try
+            {
+                // ── BƯỚC 1: Thử trích xuất ảnh nhúng (PDF thường / Word) ──────
+                DocumentWithImages parsed;
+                using (var stream = file.OpenReadStream())
+                {
+                    parsed = extension == ".pdf"
+                        ? await _fileParser.ExtractTextAndImagesFromPdfAsync(stream)
+                        : await _fileParser.ExtractTextAndImagesFromDocxAsync(stream);
+                }
+
+                // ── BƯỚC 2: Nếu không có ảnh nhúng → PDF scan hoặc PDF vector ──
+                //   Fallback: render từng trang thành ảnh JPEG, gửi toàn trang lên Vision
+                bool isPageMode = parsed.Images.Count == 0;
+                List<string> pageBase64List = new();
+
+                if (isPageMode)
+                {
+                    // Render toàn bộ trang thành ảnh
+                    ParsedDocument pageDoc;
+                    using var stream2 = file.OpenReadStream();
+                    pageDoc = extension == ".pdf"
+                        ? await _fileParser.ExtractFromPdfAsync(stream2)
+                        : await _fileParser.ExtractFromDocxAsync(stream2);
+
+                    if (pageDoc.PageImages.Count == 0)
+                        return BadRequest(new { message = "Không thể đọc nội dung từ file. File có thể bị hỏng, rỗng hoặc định dạng không được hỗ trợ." });
+
+                    pageBase64List = pageDoc.PageImages;
+
+                    // Giới hạn tối đa 20 trang để tránh quá tải Groq Vision API
+                    const int MaxPages = 20;
+                    if (pageBase64List.Count > MaxPages)
+                    {
+                        Console.WriteLine($"[Vision] PDF có {pageBase64List.Count} trang, chỉ xử lý {MaxPages} trang đầu.");
+                        pageBase64List = pageBase64List.Take(MaxPages).ToList();
+                    }
+                }
+
+                // ── BƯỚC 3: Lưu ảnh nhúng vào disk (chỉ khi không phải page mode) ──
+                var imageKeyToUrl    = new Dictionary<string, string>();
+                var imageKeyToBase64 = new Dictionary<string, string>();
+
+                if (!isPageMode)
+                {
+                    foreach (var (key, base64) in parsed.Images)
+                    {
+                        try
+                        {
+                            // Upload lên Cloudinary — trả về URL CDN https://
+                            var publicId = $"quiz_q_{DateTime.UtcNow.Ticks}_{key.ToLower()}";
+                            var cdnUrl   = await _cloudinary.UploadBase64Async(base64, "question-images", publicId);
+                            imageKeyToUrl[key]    = cdnUrl;
+                            imageKeyToBase64[key] = base64;
+                        }
+                        catch (Exception ex)
+                        {
+                            // Fallback: lưu local nếu Cloudinary lỗi
+                            var fileName = $"q_img_{DateTime.Now.Ticks}_{key.ToLower()}.jpg";
+                            var filePath = Path.Combine(uploadsDir, fileName);
+                            await System.IO.File.WriteAllBytesAsync(filePath, Convert.FromBase64String(base64));
+                            imageKeyToUrl[key]    = $"/uploads/question-images/{fileName}";
+                            imageKeyToBase64[key] = base64;
+                            Console.WriteLine($"[Cloudinary] Fallback to local for {key}: {ex.Message}");
+                        }
+                    }
+                }
+
+                // ── BƯỚC 4: Xây dựng System Prompt phù hợp với từng chế độ ──────
+                string systemPrompt;
+                List<string> imagesToSend;
+
+                if (isPageMode)
+                {
+                    // Chế độ page: gửi từng trang như ảnh, AI đọc từng trang
+                    systemPrompt = $@"
+Bạn là chuyên gia trích xuất và cấu trúc hóa dữ liệu đề thi trắc nghiệm Việt Nam.
+
+Đây là {pageBase64List.Count} trang của một đề thi. Mỗi ảnh là 1 trang đầy đủ.
+
+Nhiệm vụ: Đọc tất cả các trang và trích xuất TOÀN BỘ câu hỏi trắc nghiệm tìm thấy.
+
+Trả về JSON mảng duy nhất (không phân theo trang):
+[
+  {{
+    ""Text"": ""Nội dung đầy đủ câu hỏi kể cả mô tả hình vẽ/bảng"",
+    ""Options"": [""Đáp án A"", ""Đáp án B"", ""Đáp án C"", ""Đáp án D""],
+    ""Answer"": ""A"",
+    ""ImageKey"": null
+  }}
+]
+
+Quy tắc QUAN TRỌNG:
+- Chỉ trả về JSON thuần, KHÔNG markdown, KHÔNG giải thích ngoài JSON.
+- Nếu câu hỏi có bảng biến thiên, đồ thị, hình vẽ: mô tả ngắn gọn trong trường Text trong dấu ngoặc, ví dụ: ""(Bảng biến thiên: x từ -∞ đến -1 tăng, đạt cực đại 2 tại x=-1, ...)"".
+- Đáp án: chỉ ""A"", ""B"", ""C"" hoặc ""D"". Nếu không rõ thì để ""A"".
+- ImageKey luôn là null (chế độ toàn trang, không cắt ảnh riêng lẻ).
+- Không bỏ sót câu hỏi nào dù câu có hình vẽ hay bảng phức tạp.
+";
+                    imagesToSend = pageBase64List;
+                }
+                else
+                {
+                    // Chế độ ảnh nhúng: gửi text có placeholder + ảnh riêng
+                    systemPrompt = $@"
+Bạn là chuyên gia trích xuất và cấu trúc hóa dữ liệu đề thi.
+
+Văn bản đề thi bên dưới có placeholder [IMG_1], [IMG_2]... đánh dấu vị trí hình ảnh.
+Đi kèm là {imageKeyToBase64.Count} hình ảnh theo thứ tự tương ứng.
+
+Nhiệm vụ:
+1. Đọc văn bản, nhận dạng từng câu hỏi trắc nghiệm.
+2. Khi gặp [IMG_X]: xem ảnh tương ứng (biểu đồ, công thức, sơ đồ).
+3. Trả về JSON:
+[
+  {{
+    ""Text"": ""Nội dung câu hỏi đầy đủ"",
+    ""Options"": [""Đáp án A"", ""Đáp án B"", ""Đáp án C"", ""Đáp án D""],
+    ""Answer"": ""A"",
+    ""ImageKey"": ""IMG_1""
+  }}
+]
+
+Quy tắc:
+- Chỉ JSON thuần, không markdown, không giải thích.
+- ImageKey: tên placeholder nếu câu hỏi gắn với ảnh đó, nếu không có ảnh thì null.
+- Answer: A, B, C hoặc D. Nếu không rõ để ""A"".
+
+VĂN BẢN ĐỀ THI:
+{parsed.Text}
+";
+                    imagesToSend = imageKeyToBase64.Values.ToList();
+                }
+
+                // ── BƯỚC 5: Chia chunk (tối đa 4 ảnh/request) + gửi lên Groq Vision ──
+                const int chunkSize = 4;
+                var allRawResponses = new List<string>();
+
+                if (imagesToSend.Count == 0)
+                {
+                    // Không có ảnh nào → gửi text thuần
+                    var resp = await _groqService.ChatWithVisionAsync(systemPrompt, new List<string>());
+                    allRawResponses.Add(resp);
+                }
+                else
+                {
+                    for (int i = 0; i < imagesToSend.Count; i += chunkSize)
+                    {
+                        var chunk = imagesToSend.Skip(i).Take(chunkSize).ToList();
+                        var chunkPrompt = isPageMode
+                            ? systemPrompt + $"\n\n[Bạn đang nhận trang {i + 1} đến {Math.Min(i + chunkSize, imagesToSend.Count)} / {imagesToSend.Count} trang]"
+                            : systemPrompt;
+                        try
+                        {
+                            var resp = await _groqService.ChatWithVisionAsync(chunkPrompt, chunk);
+                            allRawResponses.Add(resp);
+                        }
+                        catch (Exception chunkEx)
+                        {
+                            Console.WriteLine($"[Vision] Chunk {i/chunkSize + 1} lỗi: {chunkEx.Message}");
+                            // Tiếp tục xử lý chunk tiếp theo thay vì dừng hẳn
+                        }
+                    }
+                }
+
+                // ── BƯỚC 6: Merge JSON từ tất cả chunk ────────────────────────
+                var allQuestions = new List<object>();
+                foreach (var raw in allRawResponses)
+                {
+                    var cleaned = ExtractJsonArray(raw);
+                    if (string.IsNullOrEmpty(cleaned)) continue;
+                    try
+                    {
+                        using var jsonDoc = JsonDocument.Parse(cleaned);
+                        if (jsonDoc.RootElement.ValueKind != JsonValueKind.Array) continue;
+
+                        foreach (var qElem in jsonDoc.RootElement.EnumerateArray())
+                        {
+                            string? imageUrl = null;
+                            if (!isPageMode && qElem.TryGetProperty("ImageKey", out var imgKeyProp))
+                            {
+                                var imgKey = imgKeyProp.GetString();
+                                if (!string.IsNullOrEmpty(imgKey) && imageKeyToUrl.TryGetValue(imgKey, out var url))
+                                    imageUrl = url;
+                            }
+
+                            allQuestions.Add(new
+                            {
+                                Text     = qElem.TryGetProperty("Text",    out var t) ? t.GetString() : "",
+                                Options  = qElem.TryGetProperty("Options", out var o) ? o.Clone() : (object)Array.Empty<string>(),
+                                Answer   = qElem.TryGetProperty("Answer",  out var a) ? a.GetString() : "A",
+                                ImageUrl = imageUrl
+                            });
+                        }
+                    }
+                    catch { /* bỏ qua chunk lỗi parse */ }
+                }
+
+                if (allQuestions.Count == 0)
+                {
+                    var debugInfo = string.Join("\n---\n", allRawResponses.Select((r, i) => $"[Response {i+1}]: {r?.Substring(0, Math.Min(500, r?.Length ?? 0))}"));
+                    Console.WriteLine($"[Vision] 0 câu hỏi. allRawResponses.Count={allRawResponses.Count}. Nội dung:\n{debugInfo}");
+                    return StatusCode(500, new
+                    {
+                        message = "AI không trả về câu hỏi nào. Vui lòng kiểm tra lại file hoặc thử lại.",
+                        debug = allRawResponses.Count == 0 ? "Groq không phản hồi (timeout/rate-limit)" : $"AI trả về {allRawResponses.Count} response nhưng không parse được câu hỏi nào",
+                        rawPreview = allRawResponses.FirstOrDefault()?.Substring(0, Math.Min(300, allRawResponses.FirstOrDefault()?.Length ?? 0))
+                    });
+                }
+
+                var mode = isPageMode ? "page-render (PDF scan)" : "embedded-image";
+                return Ok(new
+                {
+                    message        = $"Đã trích xuất {allQuestions.Count} câu hỏi ({mode}).",
+                    totalQuestions = allQuestions.Count,
+                    totalImages    = isPageMode ? pageBase64List.Count : parsed.Images.Count,
+                    imageUrls      = imageKeyToUrl,
+                    questions      = allQuestions
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Vision Smart Error] {ex.Message}. Inner: {ex.InnerException?.Message}");
+                return StatusCode(500, new { message = "Lỗi khi xử lý file.", error = ex.Message, inner = ex.InnerException?.Message });
+            }
+        }
     }
 }
+

@@ -48,7 +48,8 @@ namespace QuizApi.Controllers
                     correctOption = q.CorrectOption,
                     explanation = q.Explanation,
                     scorePerQuestion = q.ScorePerQuestion,
-                    isActive = q.IsActive
+                    isActive = q.IsActive,
+                    imageUrl = q.ImageUrl
                 }).ToList();
 
                 return Ok(projected);
@@ -168,6 +169,9 @@ namespace QuizApi.Controllers
                 existingQuestion.Explanation = updatedQuestion.Explanation;
                 existingQuestion.ScorePerQuestion = updatedQuestion.ScorePerQuestion;
                 existingQuestion.IsActive = updatedQuestion.IsActive;
+                // Chỉ cập nhật ImageUrl nếu được truyền lên (null = giữ nguyên, "" = xóa ảnh)
+                if (updatedQuestion.ImageUrl != null)
+                    existingQuestion.ImageUrl = string.IsNullOrEmpty(updatedQuestion.ImageUrl) ? null : updatedQuestion.ImageUrl;
 
                 _context.QuestionBank.Update(existingQuestion);
                 await _context.SaveChangesAsync();
@@ -203,6 +207,44 @@ namespace QuizApi.Controllers
             {
                 var innerMsg = ex.InnerException != null ? ex.InnerException.Message : "";
                 return StatusCode(500, new { message = "Lỗi hệ thống khi xóa câu hỏi.", error = ex.Message, innerError = innerMsg });
+            }
+        }
+        [HttpPost("upload-image")]
+        [Authorize(Roles = "Admin")]
+        public async Task<IActionResult> UploadQuestionImage(
+            IFormFile file,
+            [FromServices] IWebHostEnvironment env)
+        {
+            if (file == null || file.Length == 0)
+                return BadRequest(new { message = "Vui lòng chọn một file ảnh." });
+
+            var allowed = new[] { ".jpg", ".jpeg", ".png", ".gif", ".webp" };
+            var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+            if (!allowed.Contains(ext))
+                return BadRequest(new { message = "Chỉ hỗ trợ JPG, PNG, GIF, WEBP." });
+
+            if (file.Length > 5 * 1024 * 1024)
+                return BadRequest(new { message = "Ảnh tối đa 5MB." });
+
+            try
+            {
+                var uploadsDir = Path.Combine(
+                    env.WebRootPath ?? Path.Combine(Directory.GetCurrentDirectory(), "wwwroot"),
+                    "uploads", "question-images");
+                Directory.CreateDirectory(uploadsDir);
+
+                var fileName = $"{Guid.NewGuid()}{ext}";
+                var filePath = Path.Combine(uploadsDir, fileName);
+
+                using (var stream = new FileStream(filePath, FileMode.Create))
+                    await file.CopyToAsync(stream);
+
+                var imageUrl = $"/uploads/question-images/{fileName}";
+                return Ok(new { imageUrl });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Lỗi khi lưu ảnh.", error = ex.Message });
             }
         }
     }

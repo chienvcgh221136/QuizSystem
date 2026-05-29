@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
@@ -6,6 +7,11 @@ using System.Text;
 using QuizApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Thiết lập WebRootPath rõ ràng để UseStaticFiles() hoạt động đúng
+var webRootPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
+Directory.CreateDirectory(Path.Combine(webRootPath, "uploads", "question-images"));
+builder.WebHost.UseWebRoot(webRootPath);
 
 DotNetEnv.Env.Load();
 
@@ -65,8 +71,25 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddDbContext<QuizDbContext>(options =>
     options.UseSqlServer(Environment.GetEnvironmentVariable("DB_CONNECTION_STRING") ?? builder.Configuration.GetConnectionString("DefaultConnection")));
 
+// HttpClient cho GroqService với timeout dài hơn (5 phút) vì Vision API tốn thời gian xử lý nhiều ảnh
+builder.Services.AddHttpClient<QuizApi.Services.GroqService>(client =>
+{
+    client.Timeout = TimeSpan.FromMinutes(5);
+});
 builder.Services.AddHttpClient();
 builder.Services.AddScoped<QuizApi.Services.GroqService>();
+builder.Services.AddScoped<QuizApi.Services.FileParserService>();
+builder.Services.AddSingleton<QuizApi.Services.CloudinaryService>();
+
+// Cho phép upload file tối đa 20MB
+builder.Services.Configure<FormOptions>(options =>
+{
+    options.MultipartBodyLengthLimit = 20 * 1024 * 1024; // 20 MB
+});
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = 20 * 1024 * 1024; // 20 MB
+});
 
 var app = builder.Build();
 
@@ -85,6 +108,10 @@ app.UseCors("QuizChatPolicy");
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Phục vụ file tĩnh (ảnh câu hỏi) từ wwwroot/
+// Frontend truy cập qua: http://localhost:PORT/uploads/question-images/xxx.jpg
+app.UseStaticFiles();
 
 app.MapControllers();
 
@@ -138,6 +165,15 @@ using (var scope = app.Services.CreateScope())
                 IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Notifications]') AND name = 'TargetId')
                 BEGIN
                     ALTER TABLE [dbo].[Notifications] ADD [TargetId] INT NULL;
+                END
+            END
+        ");
+        context.Database.ExecuteSqlRaw(@"
+            IF EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[QuestionBank]') AND type in (N'U'))
+            BEGIN
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[QuestionBank]') AND name = 'ImageUrl')
+                BEGIN
+                    ALTER TABLE [dbo].[QuestionBank] ADD [ImageUrl] NVARCHAR(500) NULL;
                 END
             END
         ");
