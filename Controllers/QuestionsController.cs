@@ -4,6 +4,9 @@ using Microsoft.EntityFrameworkCore;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.IO;
+using ClosedXML.Excel;
 using QuizApi.Models;
 
 namespace QuizApi.Controllers
@@ -209,6 +212,116 @@ namespace QuizApi.Controllers
                 return StatusCode(500, new { message = "Lỗi hệ thống khi xóa câu hỏi.", error = ex.Message, innerError = innerMsg });
             }
         }
+
+        [HttpGet("export")]
+        [Authorize(Roles = "Admin")]
+        public async Task<IActionResult> ExportQuestions([FromQuery] string? category, [FromQuery] string? level, [FromQuery] string? search)
+        {
+            try
+            {
+                var query = _context.QuestionBank.Where(q => q.IsActive == true).AsQueryable();
+
+                if (!string.IsNullOrEmpty(search))
+                {
+                    query = query.Where(q => q.Content.Contains(search) || q.Category.Contains(search));
+                }
+
+                if (!string.IsNullOrEmpty(category) && category != "All")
+                {
+                    query = query.Where(q => q.Category == category);
+                }
+
+                if (!string.IsNullOrEmpty(level) && level != "All")
+                {
+                    query = query.Where(q => q.Level == level);
+                }
+
+                var questions = await query.OrderByDescending(q => q.CreatedAt).ToListAsync();
+
+                using (var workbook = new XLWorkbook())
+                {
+                    var worksheet = workbook.Worksheets.Add("Ngân hàng câu hỏi");
+
+                    // Headers
+                    worksheet.Cell(1, 1).Value = "Câu hỏi";
+                    worksheet.Cell(1, 2).Value = "Câu chọn";
+                    worksheet.Cell(1, 3).Value = "Đáp án";
+                    worksheet.Cell(1, 4).Value = "Giải thích";
+                    worksheet.Cell(1, 5).Value = "Ảnh";
+
+                    var headerRow = worksheet.Row(1);
+                    headerRow.Style.Font.Bold = true;
+                    headerRow.Style.Fill.BackgroundColor = XLColor.LightGray;
+                    headerRow.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+                    int row = 2;
+                    foreach (var q in questions)
+                    {
+                        worksheet.Cell(row, 1).Value = q.Content;
+                        
+                        // Option format: 1 column, multiple lines
+                        var options = new List<string>();
+                        if (!string.IsNullOrEmpty(q.OptionA)) options.Add($"A. {q.OptionA}");
+                        if (!string.IsNullOrEmpty(q.OptionB)) options.Add($"B. {q.OptionB}");
+                        if (!string.IsNullOrEmpty(q.OptionC)) options.Add($"C. {q.OptionC}");
+                        if (!string.IsNullOrEmpty(q.OptionD)) options.Add($"D. {q.OptionD}");
+                        
+                        worksheet.Cell(row, 2).Value = string.Join(Environment.NewLine, options);
+                        worksheet.Cell(row, 3).Value = q.CorrectOption;
+                        worksheet.Cell(row, 4).Value = q.Explanation;
+
+                        if (!string.IsNullOrEmpty(q.ImageUrl))
+                        {
+                            try
+                            {
+                                var relPath = q.ImageUrl.StartsWith("/") ? q.ImageUrl.Substring(1) : q.ImageUrl;
+                                var imgPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", relPath.Replace("/", "\\"));
+                                
+                                if (System.IO.File.Exists(imgPath))
+                                {
+                                    var pic = worksheet.AddPicture(imgPath)
+                                        .MoveTo(worksheet.Cell(row, 5))
+                                        .WithSize(100, 100);
+                                    
+                                    worksheet.Row(row).Height = 80; // Make row tall enough
+                                }
+                                else
+                                {
+                                    worksheet.Cell(row, 5).Value = "Ảnh không tồn tại";
+                                }
+                            }
+                            catch
+                            {
+                                worksheet.Cell(row, 5).Value = "Lỗi tải ảnh";
+                            }
+                        }
+
+                        // Enable text wrapping
+                        worksheet.Row(row).Style.Alignment.WrapText = true;
+                        
+                        row++;
+                    }
+
+                    worksheet.Column(1).Width = 50;
+                    worksheet.Column(2).Width = 40;
+                    worksheet.Column(3).Width = 15;
+                    worksheet.Column(4).Width = 50;
+                    worksheet.Column(5).Width = 20;
+
+                    using (var stream = new MemoryStream())
+                    {
+                        workbook.SaveAs(stream);
+                        var content = stream.ToArray();
+                        return File(content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "QuestionBank.xlsx");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Lỗi khi xuất dữ liệu ra Excel.", error = ex.Message });
+            }
+        }
+
         [HttpPost("upload-image")]
         [Authorize(Roles = "Admin")]
         public async Task<IActionResult> UploadQuestionImage(

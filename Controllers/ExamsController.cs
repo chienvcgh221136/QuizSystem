@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using QuizApi.Models;
 using QuizApi.Services;
+using ClosedXML.Excel;
 
 namespace QuizApi.Controllers
 {
@@ -994,6 +995,106 @@ VĂN BẢN ĐỀ THI:
             {
                 Console.WriteLine($"[Vision Smart Error] {ex.Message}. Inner: {ex.InnerException?.Message}");
                 return StatusCode(500, new { message = "Lỗi khi xử lý file.", error = ex.Message, inner = ex.InnerException?.Message });
+            }
+        }
+        [HttpGet("{id}/export")]
+        [Authorize(Roles = "Admin")]
+        public async Task<IActionResult> ExportExam(int id)
+        {
+            try
+            {
+                var exam = await _context.Exams.FindAsync(id);
+                if (exam == null) return NotFound(new { message = "Không tìm thấy đề thi." });
+
+                var examQuestions = await _context.ExamQuestions
+                    .Where(eq => eq.ExamId == id)
+                    .OrderBy(eq => eq.OrderIndex)
+                    .ToListAsync();
+
+                var questionIds = examQuestions.Select(eq => eq.QuestionId).ToList();
+                var questionsData = await _context.QuestionBank
+                    .Where(q => questionIds.Contains(q.QuestionId))
+                    .ToListAsync();
+
+                var questions = examQuestions
+                    .Select(eq => questionsData.FirstOrDefault(q => q.QuestionId == eq.QuestionId))
+                    .Where(q => q != null)
+                    .ToList();
+
+                using (var workbook = new XLWorkbook())
+                {
+                    var worksheet = workbook.Worksheets.Add("Đề thi");
+
+                    worksheet.Cell(1, 1).Value = "Câu hỏi";
+                    worksheet.Cell(1, 2).Value = "Câu chọn";
+                    worksheet.Cell(1, 3).Value = "Đáp án";
+                    worksheet.Cell(1, 4).Value = "Giải thích";
+                    worksheet.Cell(1, 5).Value = "Ảnh";
+
+                    var headerRow = worksheet.Row(1);
+                    headerRow.Style.Font.Bold = true;
+                    headerRow.Style.Fill.BackgroundColor = XLColor.LightGray;
+                    headerRow.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+                    int row = 2;
+                    foreach (var q in questions)
+                    {
+                        worksheet.Cell(row, 1).Value = q.Content;
+                        
+                        var options = new List<string>();
+                        if (!string.IsNullOrEmpty(q.OptionA)) options.Add($"A. {q.OptionA}");
+                        if (!string.IsNullOrEmpty(q.OptionB)) options.Add($"B. {q.OptionB}");
+                        if (!string.IsNullOrEmpty(q.OptionC)) options.Add($"C. {q.OptionC}");
+                        if (!string.IsNullOrEmpty(q.OptionD)) options.Add($"D. {q.OptionD}");
+                        
+                        worksheet.Cell(row, 2).Value = string.Join(Environment.NewLine, options);
+                        worksheet.Cell(row, 3).Value = q.CorrectOption;
+                        worksheet.Cell(row, 4).Value = q.Explanation;
+
+                        if (!string.IsNullOrEmpty(q.ImageUrl))
+                        {
+                            try
+                            {
+                                var relPath = q.ImageUrl.StartsWith("/") ? q.ImageUrl.Substring(1) : q.ImageUrl;
+                                var imgPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", relPath.Replace("/", "\\"));
+                                
+                                if (System.IO.File.Exists(imgPath))
+                                {
+                                    var pic = worksheet.AddPicture(imgPath).MoveTo(worksheet.Cell(row, 5)).WithSize(100, 100);
+                                    worksheet.Row(row).Height = 80;
+                                }
+                                else
+                                {
+                                    worksheet.Cell(row, 5).Value = "Ảnh không tồn tại";
+                                }
+                            }
+                            catch
+                            {
+                                worksheet.Cell(row, 5).Value = "Lỗi tải ảnh";
+                            }
+                        }
+
+                        worksheet.Row(row).Style.Alignment.WrapText = true;
+                        row++;
+                    }
+
+                    worksheet.Column(1).Width = 50;
+                    worksheet.Column(2).Width = 40;
+                    worksheet.Column(3).Width = 15;
+                    worksheet.Column(4).Width = 50;
+                    worksheet.Column(5).Width = 20;
+
+                    using (var stream = new MemoryStream())
+                    {
+                        workbook.SaveAs(stream);
+                        stream.Position = 0;
+                        return File(stream.ToArray(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $"DeThi_{id}.xlsx");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Lỗi khi xuất đề thi.", error = ex.Message });
             }
         }
     }

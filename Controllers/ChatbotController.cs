@@ -17,7 +17,7 @@ namespace QuizApi.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
-    [Authorize] 
+    [Authorize(Roles = "Admin")] // Chỉ Admin mới được dùng tính năng chatbot AI
     public class ChatbotController : ControllerBase
     {
         private readonly GroqService _groqService;

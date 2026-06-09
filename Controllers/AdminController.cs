@@ -24,7 +24,7 @@ namespace QuizApi.Controllers
         public async Task<IActionResult> GetStats()
         {
             var totalUsers = await _context.Users.CountAsync();
-            var totalExams = await _context.Exams.CountAsync();
+            var totalExams = await _context.Exams.Where(e => e.Status == "Published").CountAsync();
             var totalQuestions = await _context.QuestionBank.CountAsync();
             
             var allResults = await _context.ExamResults
