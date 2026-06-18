@@ -17,7 +17,7 @@ namespace QuizApi.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
-    [Authorize(Roles = "Admin")] // Chỉ Admin mới được dùng tính năng chatbot AI
+    [Authorize] // Mở cửa Controller cho mọi user đăng nhập
     public class ChatbotController : ControllerBase
     {
         private readonly GroqService _groqService;
@@ -648,7 +648,7 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
 
     // 3. Ghép Link 
     // Đề CHƯA LÀM -> Bắt buộc ra trang Danh sách đề để bấm nút tạo ResultId
-    var unattemptedText = string.Join("\n", unattemptedExams.Select(e => $"- Môn: {e.Category} | Đề: {e.Title} | Link: [Vào danh sách để thi](/user/exams)"));
+    var unattemptedText = string.Join("\n", unattemptedExams.Select(e => $"[CARD_EXAM|{e.ExamId}|{e.Title}|{e.Category}]"));
 
     // Đề ĐÃ LÀM -> Trỏ thẳng vào trang Kết quả bằng LatestResultId
     var attemptedText = string.Join("\n", attemptedExams.Select(e => $"[CARD_RESULT|{e.LatestResultId}|{e.Title}|{e.Category}]"));
@@ -679,7 +679,7 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
 4. NGUỒN GIẢI THÍCH: Chỉ dùng kiến thức trong [NGUỒN_GIẢNG_BÀI]. Nếu ghi [TRỐNG], BẮT BUỘC trả lời: ""Hệ thống sẽ sớm cập nhật.""
 5. TƯ VẤN ĐỀ THI (QUAN TRỌNG): Khi người dùng yêu cầu tìm đề thi (chưa làm/đã làm, có thể kèm tên môn cụ thể), hãy tìm trong ""DANH MỤC ĐỀ THI HIỆN CÓ"" và liệt kê ra. 
    - Nếu có tên môn, CHỈ lọc các đề của môn đó. Nếu không có môn nào khớp, xin lỗi khéo léo.
-   - BẮT BUỘC in ra đúng định dạng link Markdown mà hệ thống cung cấp (Ví dụ: [Bấm để làm bài](/exam/1)). Tuyệt đối không tự bịa ra link.
+   - BẮT BUỘC in ra đúng định dạng link Markdown mà hệ thống cung cấp (Ví dụ: [Tên đề thi](/user/exams?examId=1)). Tuyệt đối không tự bịa ra link.
 6. GIỚI HẠN PHẠM VI: Chỉ trả lời các câu hỏi về IT và bài thi.
 7. BẢO MẬT: CẤM tự tạo câu hỏi mới trong luồng chat này.
 </strict_rules>";
@@ -709,6 +709,7 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
 }
 
         [HttpPost("ask")]
+        [Authorize(Roles = "Admin")] // Chỉ Admin mới được tạo đề
         public async Task<IActionResult> Ask([FromBody] ChatRequest request)
         {
             if (string.IsNullOrEmpty(request.Message) && string.IsNullOrEmpty(request.FileContent))
@@ -1717,6 +1718,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
             });
         }
         [HttpPost("upload-file")]
+        [Authorize(Roles = "Admin")] // Chỉ Admin mới được tải file lên tạo đề
         [Consumes("multipart/form-data")]
         public async Task<IActionResult> UploadFile(
             IFormFile file,
