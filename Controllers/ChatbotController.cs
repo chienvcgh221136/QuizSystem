@@ -17,7 +17,7 @@ namespace QuizApi.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
-    [Authorize] // Mở cửa Controller cho mọi user đăng nhập
+    [Authorize]
     public class ChatbotController : ControllerBase
     {
         private readonly GroqService _groqService;
@@ -289,27 +289,20 @@ namespace QuizApi.Controllers
             return collapsed;
         }
 
-        /// <summary>
-        /// Trả về canonical key của category (e.g. "C#", ".NET Core", "IT") dựa trên
-        /// tên category hoặc alias. Trả về null nếu không nhận ra.
-        /// </summary>
         private static string? ResolveCanonicalCategory(string category)
         {
             if (string.IsNullOrWhiteSpace(category)) return null;
 
-            // Tìm match trong CategoryAliases
             foreach (var kv in CategoryAliases)
             {
-                // So khớp với chính canonical key
+
                 if (string.Equals(category.Trim(), kv.Key, StringComparison.OrdinalIgnoreCase))
                     return kv.Key;
 
-                // So khớp với aliases
                 if (kv.Value.Any(alias => string.Equals(category.Trim(), alias, StringComparison.OrdinalIgnoreCase)))
                     return kv.Key;
             }
 
-            // Không nhận ra → trả nguyên bản (để match exact với DB)
             return category.Trim();
         }
 
@@ -317,13 +310,11 @@ namespace QuizApi.Controllers
         {
             if (string.IsNullOrWhiteSpace(dbCategory)) return false;
 
-            // Resolve cả hai về canonical key
             var requestedCanonical = ResolveCanonicalCategory(requestedCategory);
             var dbCanonical = ResolveCanonicalCategory(dbCategory);
 
-            if (string.IsNullOrWhiteSpace(requestedCanonical)) return true; // không lọc
+            if (string.IsNullOrWhiteSpace(requestedCanonical)) return true;
 
-            // So sánh exact canonical key
             return string.Equals(dbCanonical, requestedCanonical, StringComparison.OrdinalIgnoreCase);
         }
 
@@ -530,10 +521,9 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
         return BadRequest("Tin nhắn không được để trống.");
 
     string currentUsername = User.Identity?.Name ?? "User";
-    
-    // 1. Lịch sử chat
+
     var history = await _context.ChatMessages
-        .Where(m => m.Username == currentUsername) // Lấy cả lịch sử của AI để có ngữ cảnh đầy đủ
+        .Where(m => m.Username == currentUsername)
         .OrderByDescending(m => m.SentAt)
         .Take(10)
         .OrderBy(m => m.SentAt)
@@ -541,8 +531,8 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
 
     string examHistoryContext = "Học viên chưa làm bài thi nào.";
     string wrongAnswersContext = "Chưa có dữ liệu câu sai gần đây.";
-    
-    try 
+
+    try
     {
         var recentExams = await (from er in _context.ExamResults
                                  join u in _context.Users on er.UserId equals u.UserId
@@ -559,14 +549,13 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
             examHistoryContext = string.Join("\n", historyLines);
             var recentResultIds = recentExams.Select(e => e.ResultId).ToList();
 
-            // Lấy dữ liệu câu sai từ các lần thi gần nhất, kết hợp với thông tin giải thích nếu có
             var wrongAnswersRaw = await (from ua in _context.UserAnswers
                                       join q in _context.QuestionBank on ua.QuestionId equals q.QuestionId
                                       join er in _context.ExamResults on ua.ResultId equals er.ResultId
                                       join ex in _context.Exams on er.ExamId equals ex.ExamId
                                       join eq in _context.ExamQuestions on new { er.ExamId, ua.QuestionId } equals new { eq.ExamId, eq.QuestionId }
-                                      where recentResultIds.Contains(ua.ResultId) 
-                                            && ua.SelectedOption != q.CorrectOption 
+                                      where recentResultIds.Contains(ua.ResultId)
+                                            && ua.SelectedOption != q.CorrectOption
                                       select new {
                                           er.ResultId,
                                           ExamTitle = ex.Title,
@@ -583,18 +572,16 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
 
             if (wrongAnswersRaw.Any()) {
                 var formattedWrongs = new List<string>();
-                
-                // Nhóm theo ResultId để tách biệt các lần nộp bài khác nhau
+
                 var groupedWrongs = wrongAnswersRaw.GroupBy(w => new { w.ResultId, w.ExamTitle });
-                
-                // Chỉ lấy BÀI THI GẦN NHẤT để tránh AI bị ngợp và lặp câu hỏi
+
                 var latestGroup = groupedWrongs.OrderByDescending(g => g.Key.ResultId).First();
-                
+
                 formattedWrongs.Add($"\n[ĐỀ THI: {latestGroup.Key.ExamTitle.ToUpper()}]");
-                
+
                 var uniqueQuestions = latestGroup.DistinctBy(q => q.Content).OrderBy(q => q.OrderIndex).Take(5);
 
-                foreach(var item in uniqueQuestions) 
+                foreach(var item in uniqueQuestions)
                 {
                     string GetOptionText(string? opt) {
                         return (opt?.ToUpper().Trim()) switch {
@@ -607,9 +594,9 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
                     }
                     string userChoice = GetOptionText(item.SelectedOption);
                     string correctChoice = GetOptionText(item.CorrectOption);
-                    
-                    string explanationText = !string.IsNullOrWhiteSpace(item.Explanation) 
-                        ? $"\n  + [NGUỒN_GIẢNG_BÀI]: \"{item.Explanation}\"" 
+
+                    string explanationText = !string.IsNullOrWhiteSpace(item.Explanation)
+                        ? $"\n  + [NGUỒN_GIẢNG_BÀI]: \"{item.Explanation}\""
                         : "\n  + [NGUỒN_GIẢNG_BÀI]: [TRỐNG] -> LỆNH BẮT BUỘC: Bạn CHỈ ĐƯỢC PHÉP trả lời đúng 1 câu 'Hệ thống sẽ sớm cập nhật.' Tuyệt đối không tự suy luận giải thích.";
 
                     formattedWrongs.Add($"CÂU SỐ {item.OrderIndex}: \"{item.Content}\"\n  + Học viên chọn ({item.SelectedOption ?? "Trống"}): \"{userChoice}\"\n  + Đáp án đúng ({item.CorrectOption}): \"{correctChoice}\"{explanationText}");
@@ -623,9 +610,8 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
     catch (Exception ex)
     {
         Console.WriteLine($"[Lỗi RAG Dữ liệu thi]: {ex.Message}");
-    }  
-    
-    // 1. Xử lý ĐỀ ĐÃ LÀM: Gom nhóm để lấy được ResultId của lần thi gần nhất
+    }
+
     var attemptedExams = await (from er in _context.ExamResults
                                 join u in _context.Users on er.UserId equals u.UserId
                                 join ex in _context.Exams on er.ExamId equals ex.ExamId
@@ -635,22 +621,18 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
                                     ExamId = g.Key.ExamId,
                                     Title = g.Key.Title,
                                     Category = g.Key.Category,
-                                    // Lấy ID của lần nộp bài mới nhất để làm link kết quả
-                                    LatestResultId = g.Max(x => x.ResultId) 
+
+                                    LatestResultId = g.Max(x => x.ResultId)
                                 }).ToListAsync();
 
     var attemptedExamIds = attemptedExams.Select(e => e.ExamId).ToList();
 
-    // 2. Xử lý ĐỀ CHƯA LÀM
     var unattemptedExams = await _context.Exams
                                 .Where(e => e.Status == "Published" && !attemptedExamIds.Contains(e.ExamId))
                                 .ToListAsync();
 
-    // 3. Ghép Link 
-    // Đề CHƯA LÀM -> Bắt buộc ra trang Danh sách đề để bấm nút tạo ResultId
     var unattemptedText = string.Join("\n", unattemptedExams.Select(e => $"[CARD_EXAM|{e.ExamId}|{e.Title}|{e.Category}]"));
 
-    // Đề ĐÃ LÀM -> Trỏ thẳng vào trang Kết quả bằng LatestResultId
     var attemptedText = string.Join("\n", attemptedExams.Select(e => $"[CARD_RESULT|{e.LatestResultId}|{e.Title}|{e.Category}]"));
 
     string examLinksContext = $@"
@@ -660,7 +642,7 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
 [ĐỀ THI ĐÃ LÀM]:
 {(attemptedExams.Any() ? attemptedText : "Chưa làm đề thi nào.")}
 ";
-    // Luật train chatbot AI
+
     string systemPrompt = $@"You are 'QuizChat AI Tutor', an empathetic, friendly, and expert programming teacher.
 
 <student_memory>
@@ -675,9 +657,9 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
 <strict_rules>
 1. TỰ NHIÊN: Xưng ""Mình"" và ""Bạn"". TUYỆT ĐỐI KHÔNG để lộ các thẻ nội bộ ra ngoài.
 2. ĐÁNH SỐ CÂU: BẮT BUỘC gọi đúng ""CÂU SỐ X"".
-3. TRÌNH BÀY ĐỒNG NHẤT: Trình bày các câu sai giống hệt nhau. 
+3. TRÌNH BÀY ĐỒNG NHẤT: Trình bày các câu sai giống hệt nhau.
 4. NGUỒN GIẢI THÍCH: Chỉ dùng kiến thức trong [NGUỒN_GIẢNG_BÀI]. Nếu ghi [TRỐNG], BẮT BUỘC trả lời: ""Hệ thống sẽ sớm cập nhật.""
-5. TƯ VẤN ĐỀ THI (QUAN TRỌNG): Khi người dùng yêu cầu tìm đề thi (chưa làm/đã làm, có thể kèm tên môn cụ thể), hãy tìm trong ""DANH MỤC ĐỀ THI HIỆN CÓ"" và liệt kê ra. 
+5. TƯ VẤN ĐỀ THI (QUAN TRỌNG): Khi người dùng yêu cầu tìm đề thi (chưa làm/đã làm, có thể kèm tên môn cụ thể), hãy tìm trong ""DANH MỤC ĐỀ THI HIỆN CÓ"" và liệt kê ra.
    - Nếu có tên môn, CHỈ lọc các đề của môn đó. Nếu không có môn nào khớp, xin lỗi khéo léo.
    - BẮT BUỘC in ra đúng định dạng link Markdown mà hệ thống cung cấp (Ví dụ: [Tên đề thi](/user/exams?examId=1)). Tuyệt đối không tự bịa ra link.
 6. GIỚI HẠN PHẠM VI: Chỉ trả lời các câu hỏi về IT và bài thi.
@@ -687,14 +669,14 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
     try
     {
         var aiRawResponse = await _groqService.ChatAsync(systemPrompt, history, request.Message);
-        
+
         var chatMsg = new ChatMessage
         {
             Username = currentUsername,
             UserMessage = request.Message,
             AiResponse = aiRawResponse,
             SentAt = DateTime.UtcNow,
-            //Metadata = "tutor_chat_v6" 
+
         };
         _context.ChatMessages.Add(chatMsg);
         await _context.SaveChangesAsync();
@@ -709,12 +691,12 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
 }
 
         [HttpPost("ask")]
-        [Authorize(Roles = "Admin")] // Chỉ Admin mới được tạo đề
+        [Authorize(Roles = "Admin")]
         public async Task<IActionResult> Ask([FromBody] ChatRequest request)
         {
             if (string.IsNullOrEmpty(request.Message) && string.IsNullOrEmpty(request.FileContent))
                 return BadRequest("Tin nhắn không được để trống.");
-            // Nếu chỉ có file mà không có message, tự thêm lệnh mặc định
+
             if (string.IsNullOrEmpty(request.Message))
                 request.Message = "Hãy tạo đề thi từ nội dung tài liệu đính kèm.";
 
@@ -728,10 +710,10 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
                 .Select(g => new { Category = g.Key, Count = g.Count() })
                 .ToListAsync();
             string dbStats = string.Join(", ", stats.Select(s => $"{s.Category}: {s.Count} câu"));
-            // Nếu có file đính kèm, ghi chú rõ để AI không dựa vào DB
+
             if (!string.IsNullOrWhiteSpace(request.FileContent))
             {
-                dbStats = dbStats + " [CHÚ Ý: Người dùng đã đính kèm tài liệu - BỎ QUA database stats, tạo câu hỏi HOÀN TOÀN từ nội dung tài liệu đính kèm]";  
+                dbStats = dbStats + " [CHÚ Ý: Người dùng đã đính kèm tài liệu - BỎ QUA database stats, tạo câu hỏi HOÀN TOÀN từ nội dung tài liệu đính kèm]";
             }
 
             string currentUsername = User.Identity?.Name ?? "Admin";
@@ -743,12 +725,11 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
                 .ToListAsync();
             var compactHistory = BuildCompactHistory(history, 3);
             bool isExamModificationRequest = userMsg.Contains("thay đổi câu") || userMsg.Contains("đổi câu") || userMsg.Contains("sửa câu") || userMsg.Contains("chỉnh sửa câu") || userMsg.Contains("đổi đề") || userMsg.Contains("thay đổi đề") || userMsg.Contains("sửa đề") || userMsg.Contains("thay đổi độ khó") || userMsg.Contains("giảm độ khó") || userMsg.Contains("tăng độ khó") || userMsg.Contains("thêm câu") || userMsg.Contains("thêm 1 câu") || userMsg.Contains("thêm 2 câu") || userMsg.Contains("thêm 3 câu") || userMsg.Contains("bổ sung câu") || userMsg.Contains("cộng thêm câu") || userMsg.Contains("mở rộng đề") || userMsg.Contains("nâng lên") || userMsg.Contains("tăng lên");
-            
-            // Debug logging
+
             Console.WriteLine($"[Debug] isExamModificationRequest: {isExamModificationRequest}");
             Console.WriteLine($"[Debug] requestedQuestionIndexes: {string.Join(", ", requestedQuestionIndexes)}");
             Console.WriteLine($"[Debug] User message: {request.Message}");
-            
+
             string? previousExamMetadata = null;
             if (isExamModificationRequest)
             {
@@ -775,7 +756,7 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
             }
             int previousExamQuestionLimit = (isExamModificationRequest && requestedQuestionCount.GetValueOrDefault() > 0 && requestedQuestionIndexes.Count == 0) ? 2 : 3;
             string? compactPreviousExamContext = BuildCompactPreviousExamContext(previousExamMetadata, requestedQuestionIndexes, previousExamQuestionLimit);
-            // If the user explicitly requested to "tạo đề" / create an exam AND NO FILE IS ATTACHED, use DB-only flow and do not call AI.
+
             if (isExamRequest && string.IsNullOrWhiteSpace(request.FileContent))
             {
                 var (categoryLocal, countLocal, levelLocal) = ParseExamIntentLocally(request.Message);
@@ -789,7 +770,6 @@ public async Task<IActionResult> Tutor([FromBody] ChatRequest request)
                 return await HandleCreateExam(categoryLocal, levelLocal, countLocal, countLocal, request.Message);
             }
 
-            // Lấy danh sách category thực tế từ DB để đưa vào prompt
             var allowedCategories = await _context.QuestionBank
                 .Where(q => !string.IsNullOrEmpty(q.Category))
                 .Select(q => q.Category)
@@ -804,7 +784,7 @@ CURRENT DATABASE STATS: {dbStats}
 ALLOWED CATEGORIES (MANDATORY - use EXACTLY one of these for the ""category"" field): [{allowedCategoriesStr}]
 
 STRICT RULES:
-1. You are an expert in the categories listed above. 
+1. You are an expert in the categories listed above.
 2. If the user asks for an exam, you SHOULD use existing question counts as a reference, but you ARE encouraged to generate NEW high-quality questions to fulfill the request.
 3. You CANNOT provide information from the external world (news, etc.).
 4. CONTEXT MEMORY: Use the previous conversation history provided in the chat logs to stay on track.
@@ -814,7 +794,7 @@ STRICT RULES:
 7a. EXAMPLE LEVEL GUIDELINES: Use the examples below to match the tone and difficulty of generated questions. STRICTLY follow these styles when generating questions for each level.
     - Sơ cấp (Easy): short, direct questions testing basic facts or simple calculations. Example: ""Tìm x: 2x + 5 = 11"" with simple numeric options.
     - Trung cấp (Intermediate): multi-step problems or applied knowledge requiring short reasoning. Example: ""Cho tam giác vuông có hai cạnh góc vuông 3cm và 4cm. Tìm độ dài cạnh huyền."" with plausible distractors.
-    - Cao cấp (Advanced): conceptual or multi-part problems requiring deeper reasoning, proofs, or code-level understanding. Example: ""Cho hàm f(x)=x^3-3x+1, chứng minh rằng f có đúng một nghiệm thực và ước lượng nghiệm đó."" 
+    - Cao cấp (Advanced): conceptual or multi-part problems requiring deeper reasoning, proofs, or code-level understanding. Example: ""Cho hàm f(x)=x^3-3x+1, chứng minh rằng f có đúng một nghiệm thực và ước lượng nghiệm đó.""
     Note: When possible, include short context or constraints for Trung cấp/Cao cấp to avoid ambiguous or trivial items.
 8. If the user asks to create or generate a quiz or exam (e.g. ""tạo đề"", ""soạn đề"", ""generate exam"", ""create quiz""), you MUST set ""intent"": ""create_exam"" and generate the full questions array immediately. Do not ask clarifying questions first.
 8a. If the user specifies a number of questions, generate exactly that many questions. Do not generate more or fewer.
@@ -849,7 +829,6 @@ If modifying specific question(s) only:
 If just chatting:
 {{ ""message"": ""Your response."" }}";
 
-            // Đưa nội dung tài liệu vào system prompt nếu user gửi kèm file
             if (!string.IsNullOrWhiteSpace(request.FileContent))
             {
                 var truncatedFileContent = request.FileContent.Length > 30000
@@ -925,8 +904,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
 
             try
             {
-                // Khi có file đính kèm, đưa nội dung file TRỰC TIẾP vào phần user message
-                // thay vì chỉ để trong system prompt (AI sẽ chắc chắn đọc được)
+
                 string userMessageForGroq = request.Message;
                 if (!string.IsNullOrWhiteSpace(request.FileContent))
                 {
@@ -958,18 +936,18 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                         string potentialJson = cleanedResponse.Substring(start);
                         string repairedJson = RepairTruncatedJson(potentialJson);
                         var data = JsonSerializer.Deserialize<JsonElement>(repairedJson);
-                        
+
                         if (data.TryGetProperty("intent", out var intentProp) && intentProp.GetString() == "create_exam") {
                             hasDraft = true;
-                            
+
                             string title = "Đề thi mới";
                             if (data.TryGetProperty("title", out var titleProp)) title = titleProp.GetString() ?? title;
 
                             string category = "Chung";
                             if (data.TryGetProperty("category", out var catProp)) category = catProp.GetString() ?? category;
-                            // Resolve canonical (hardcoded aliases)
+
                             category = ResolveCanonicalCategory(category) ?? category;
-                            // Bắt buộc phải map vào category có sẵn trong DB — không tạo mới
+
                             var dbCategories = await _context.QuestionBank
                                 .Where(q => !string.IsNullOrEmpty(q.Category))
                                 .Select(q => q.Category)
@@ -977,7 +955,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                 .ToListAsync();
                             if (dbCategories.Count > 0)
                             {
-                                // 1. Exact match (case-insensitive)
+
                                 var exactMatch = dbCategories.FirstOrDefault(c =>
                                     string.Equals(c, category, StringComparison.OrdinalIgnoreCase));
                                 if (exactMatch != null)
@@ -986,7 +964,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                 }
                                 else
                                 {
-                                    // 2. Canonical match qua IsCategoryMatch
+
                                     var canonicalMatch = dbCategories.FirstOrDefault(c => IsCategoryMatch(c, category));
                                     if (canonicalMatch != null)
                                     {
@@ -994,7 +972,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                     }
                                     else
                                     {
-                                        // 3. Fallback: category đầu tiên trong DB (không để sinh mới)
+
                                         category = dbCategories.First();
                                     }
                                 }
@@ -1041,23 +1019,20 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                             int questionCountRequested = requestedCount > 0 ? requestedCount : 0;
                             int questionCountActual = 0;
                             var validQuestionsList = new List<Dictionary<string, object>>();
-                            // If user explicitly requested a number of questions, prefer using existing DB questions of the same level
-                            // when enough are available. This avoids AI generating off-level or low-quality questions.
-                            // SKIP this DB-first path if user attached a file - always use AI-generated questions from the document.
+
                             if (requestedCount > 0 && string.IsNullOrWhiteSpace(request.FileContent))
                             {
                                 var canonicalLevel = CanonicalizeLevel(level);
                                 var dbCount = (await GetMatchedActiveQuestions(category, canonicalLevel)).Count;
                                 if (dbCount >= requestedCount)
                                 {
-                                    // Use DB-sourced random questions
+
                                     validQuestionsList = await BuildRandomQuestionItems(category, canonicalLevel, requestedCount);
                                     questionCountActual = validQuestionsList.Count;
                                     questionCountAdjusted = false;
                                 }
                             }
-                            // Chỉ dùng câu hỏi từ AI nếu DB chưa đủ số lượng cần thiết
-                            // (tránh trộn câu hỏi sai chủ đề do AI sinh ra)
+
                             bool dbAlreadyFulfilled = requestedCount > 0 && string.IsNullOrWhiteSpace(request.FileContent) && validQuestionsList.Count >= requestedCount;
                             if (!dbAlreadyFulfilled && data.TryGetProperty("questions", out var questionsProp) && questionsProp.ValueKind == JsonValueKind.Array) {
                                 foreach (var qElem in questionsProp.EnumerateArray()) {
@@ -1067,7 +1042,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                             validQuestionsList.Add(questionItem);
                                         }
                                     } catch {
-                                        // Skip invalid question element
+
                                     }
                                 }
                             }
@@ -1081,14 +1056,14 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                 }
                                 else if (validQuestionsList.Count < requestedCount)
                                 {
-                                    // Nếu có file đính kèm, dùng câu AI đã sinh dù thiếu (không fallback DB)
+
                                     if (!string.IsNullOrWhiteSpace(request.FileContent))
                                     {
-                                        // Giữ nguyên những câu AI sinh từ file
+
                                     }
                                     else
                                     {
-                                        // Not enough AI-provided questions; fallback to DB-created exam
+
                                         return await HandleCreateExam(category, level, requestedCount, requestedCount, request.Message);
                                     }
                                 }
@@ -1100,7 +1075,6 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                 questionCountAdjusted = true;
                             }
 
-                            // Assign ảnh Cloudinary vào câu hỏi theo thứ tự (ảnh PDF xuất hiện theo vị trí)
                             if (request.ImageUrls != null && request.ImageUrls.Count > 0 && !string.IsNullOrWhiteSpace(request.FileContent))
                             {
                                 int imgIdx = 0;
@@ -1119,25 +1093,24 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                     {
                                         var prevQuestions = prevQuestionsProp.EnumerateArray().ToList();
 
-                                        // IMPORTANT: If user requested specific question modifications, patch only those questions
                                         if (requestedQuestionIndexes.Count > 0)
                                         {
-                                            // Strategy: The AI should return ALL questions. If it doesn't, we use the ones it did return to patch requested indexes
+
                                             var patchedQuestions = new List<Dictionary<string, object>>();
-                                            
+
                                             for (int i = 0; i < prevQuestions.Count; i++)
                                             {
-                                                int questionNum = i + 1; // 1-based index
+                                                int questionNum = i + 1;
                                                 bool isRequestedIndex = requestedQuestionIndexes.Contains(questionNum);
 
                                                 if (isRequestedIndex && i < validQuestionsList.Count)
                                                 {
-                                                    // Use the AI-modified question for this index
+
                                                     patchedQuestions.Add(validQuestionsList[i]);
                                                 }
                                                 else
                                                 {
-                                                    // Preserve the previous question unchanged
+
                                                     var prev = prevQuestions[i];
                                                     patchedQuestions.Add(BuildQuestionItemFromStoredJson(prev));
                                                 }
@@ -1146,12 +1119,10 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                         }
                                                                 else
                                                                 {
-                                                                    // No specific questions were requested to be modified.
-                                                                    // If the AI returned the same number of questions, it's a full regeneration - use it.
-                                                                    // If different count, decide if user asked to increase questions.
+
                                                                     if (validQuestionsList.Count != prevQuestions.Count)
                                                                     {
-                                                                        // Inspect user's message to understand increase vs replace
+
                                                                         var (targetTotal, additionalCount, isIncreaseRequest) = ParseQuestionCountRequest(request.Message);
 
                                                                         if (isIncreaseRequest)
@@ -1168,13 +1139,13 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                                                             }
                                                                             else
                                                                             {
-                                                                                // Fallback: preserve previous exam
+
                                                                                 validQuestionsList = prevQuestions.Select(BuildQuestionItemFromStoredJson).ToList();
                                                                             }
                                                                         }
                                                                         else
                                                                         {
-                                                                            // Preserve the entire previous exam for safety.
+
                                                                             validQuestionsList = prevQuestions.Select(BuildQuestionItemFromStoredJson).ToList();
                                                                         }
                                                                     }
@@ -1183,7 +1154,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                                 }
                                 catch
                                 {
-                                    // If previous metadata cannot be parsed, fall back to AI response.
+
                                 }
                             }
 
@@ -1208,7 +1179,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                             _context.ChatMessages.Add(chatMsg);
                             await _context.SaveChangesAsync();
 
-                            return Ok(new { 
+                            return Ok(new {
                                 intent = "create_exam",
                                 hasDraft = hasDraft,
                                 message = aiText,
@@ -1508,7 +1479,6 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
             int count = countMatch.Success ? int.Parse(countMatch.Groups[1].Value) : 10;
             string level = CanonicalizeLevel(message);
 
-            // Tìm category (tìm các keyword phổ biến)
             string category = "";
 
             string msgLower = NormalizeForMatch(message);
@@ -1523,7 +1493,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                         break;
                     }
                 }
-                
+
                 if (matched)
                 {
                     category = kv.Key;
@@ -1537,8 +1507,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
         private List<int> ParseRequestedQuestionIndexes(string message)
         {
             var result = new List<int>();
-            
-            // Pattern 1: "câu số X", "câu X", "câu hỏi X", "câu hỏi số X"
+
             var regex = new System.Text.RegularExpressions.Regex(@"câu(?:\s+hỏi)?(?:\s+số)?\s+(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             foreach (System.Text.RegularExpressions.Match match in regex.Matches(message))
             {
@@ -1548,7 +1517,6 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                 }
             }
 
-            // Pattern 2: "question X", "q1", "Q2"
             if (result.Count == 0)
             {
                 regex = new System.Text.RegularExpressions.Regex(@"question\s+(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -1561,7 +1529,6 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                 }
             }
 
-            // Pattern 3: Single letter "Q" followed by number
             if (result.Count == 0)
             {
                 regex = new System.Text.RegularExpressions.Regex(@"[qQ]\s*(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -1574,7 +1541,6 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                 }
             }
 
-            // Pattern 4: number before "câu" or "câu hỏi", often used in modification requests like "sửa 1 câu"
             if (result.Count == 0)
             {
                 regex = new System.Text.RegularExpressions.Regex(@"(\d+)\s*(?:câu|cau|câu hỏi|question|questions)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -1597,7 +1563,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
 
             if (matchedQuestions.Count == 0)
             {
-                // Kiểm tra xem có phải do thiếu độ khó không
+
                 var categoryQuestions = await _context.QuestionBank
                     .Where(q => q.IsActive == true)
                     .ToListAsync();
@@ -1623,9 +1589,9 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                 Description = $"Đề thi tự động gồm {actualCount} câu hỏi chủ đề {category}.",
                 Category = category,
                 Level = canonicalLevel,
-                TimeLimit = actualCount * 2, 
+                TimeLimit = actualCount * 2,
                 TotalScore = totalScore,
-                Status = "Published",         
+                Status = "Published",
                 CreatedAt = DateTime.Now,
                 CreatedBy = "Admin"
             };
@@ -1667,7 +1633,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                 if (!string.IsNullOrEmpty(q.OptionB)) optionsList.Add(q.OptionB);
                 if (!string.IsNullOrEmpty(q.OptionC)) optionsList.Add(q.OptionC);
                 if (!string.IsNullOrEmpty(q.OptionD)) optionsList.Add(q.OptionD);
-                
+
                 return new {
                     id = q.QuestionId,
                     text = q.Content,
@@ -1699,7 +1665,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
             _context.ChatMessages.Add(chatMsg);
             await _context.SaveChangesAsync();
 
-            return Ok(new { 
+            return Ok(new {
                 response = responseMessage,
                 examId = newExam.ExamId,
                 title = newExam.Title,
@@ -1718,7 +1684,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
             });
         }
         [HttpPost("upload-file")]
-        [Authorize(Roles = "Admin")] // Chỉ Admin mới được tải file lên tạo đề
+        [Authorize(Roles = "Admin")]
         [Consumes("multipart/form-data")]
         public async Task<IActionResult> UploadFile(
             IFormFile file,
@@ -1736,7 +1702,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
 
             try
             {
-                // 1. Extract text (cho chatbot AI)
+
                 string extractedText;
                 using (var stream = file.OpenReadStream())
                 {
@@ -1746,7 +1712,6 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                         extractedText = await _fileParserService.ExtractTextFromDocxAsync(stream);
                 }
 
-                // 2. Extract ảnh nhúng (song song, không fail nếu lỗi)
                 var imageUrls = new List<string>();
                 try
                 {
@@ -1758,7 +1723,6 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                             : await _fileParserService.ExtractTextAndImagesFromDocxAsync(stream2);
                     }
 
-                    // Upload từng ảnh lên Cloudinary
                     foreach (var (key, base64) in parsed.Images)
                     {
                         try
@@ -1767,15 +1731,14 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                             var cdnUrl   = await cloudinary.UploadBase64Async(base64, "chatbot-images", publicId);
                             imageUrls.Add(cdnUrl);
                         }
-                        catch { /* bỏ qua ảnh lỗi */ }
+                        catch {  }
                     }
                 }
-                catch { /* không có ảnh hoặc không extract được — không sao */ }
+                catch {  }
 
                 if (string.IsNullOrWhiteSpace(extractedText) && imageUrls.Count == 0)
                     return BadRequest(new { message = "Không thể trích xuất nội dung từ tệp này. Tệp có thể bị bảo vệ hoặc rỗng." });
 
-                // Nếu PDF scan (không có text nhưng có ảnh), tạo text mô tả
                 if (string.IsNullOrWhiteSpace(extractedText))
                     extractedText = $"[File có {imageUrls.Count} hình ảnh đính kèm, vui lòng dùng tính năng Import trong trang Ngân hàng câu hỏi để đọc ảnh chính xác hơn]";
 
@@ -1784,7 +1747,7 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                     fileName  = file.FileName,
                     text      = extractedText,
                     charCount = extractedText.Length,
-                    imageUrls // mảng URL Cloudinary
+                    imageUrls
                 });
             }
             catch (InvalidOperationException ex)
@@ -1797,7 +1760,6 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
                 return StatusCode(500, new { message = "Lỗi khi xử lý tệp tải lên." });
             }
         }
-
 
         [HttpDelete("history")]
         public async Task<IActionResult> ClearHistory()
@@ -1829,6 +1791,6 @@ IMPORTANT: Do NOT return the entire previous exam when the user asked to add que
         public string? Message { get; set; }
         public string? FileContent { get; set; }
         public string? FileName { get; set; }
-        public List<string>? ImageUrls { get; set; }  // URLs Cloudinary ảnh từ file
+        public List<string>? ImageUrls { get; set; }
     }
 }

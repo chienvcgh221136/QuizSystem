@@ -8,7 +8,6 @@ using QuizApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Thiết lập WebRootPath rõ ràng để UseStaticFiles() hoạt động đúng
 var webRootPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
 Directory.CreateDirectory(Path.Combine(webRootPath, "uploads", "question-images"));
 builder.WebHost.UseWebRoot(webRootPath);
@@ -20,8 +19,8 @@ builder.Services.AddCors(options =>
     options.AddPolicy("QuizChatPolicy", policy =>
     {
         policy.WithOrigins(
-                "http://localhost:5002",  // QuizChat frontend (fixed)
-                "http://localhost:5173",  // QuizSystemApp frontend
+                "http://localhost:5002",
+                "http://localhost:5173",
                 "http://localhost:5174",
                 "http://localhost:5175",
                 "http://localhost:5176",
@@ -71,29 +70,25 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
 
-            // Chấp nhận token từ CẢ HAI hệ thống (QuizChat và QuizSystemApp)
             ValidIssuers = new[]
             {
                 Environment.GetEnvironmentVariable("JWT_ISSUER") ?? builder.Configuration["JwtSettings:Issuer"],
-                "QuizSystem"   // Issuer của QuizSystemApp
+                "QuizSystem"
             },
             ValidAudiences = new[]
             {
                 Environment.GetEnvironmentVariable("JWT_AUDIENCE") ?? builder.Configuration["JwtSettings:Audience"],
-                "QuizSystemClient"  // Audience của QuizSystemApp
+                "QuizSystemClient"
             },
 
-            // Thử key QuizChat trước, nếu không được thì thử key QuizSystemApp
             IssuerSigningKeyResolver = (token, securityToken, kid, parameters) =>
             {
                 var keys = new List<Microsoft.IdentityModel.Tokens.SecurityKey>();
 
-                // Key của QuizChat backend
                 var quizChatKey = Environment.GetEnvironmentVariable("JWT_SECRET_KEY")
                     ?? builder.Configuration["JwtSettings:SecretKey"]!;
                 keys.Add(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(quizChatKey)));
 
-                // Key của QuizSystemApp backend
                 keys.Add(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(
                     "SuperSecretKey12345!SuperSecretKey12345!")));
 
@@ -105,7 +100,6 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddDbContext<QuizDbContext>(options =>
     options.UseSqlServer(Environment.GetEnvironmentVariable("DB_CONNECTION_STRING") ?? builder.Configuration.GetConnectionString("DefaultConnection")));
 
-// HttpClient cho GroqService với timeout dài hơn (5 phút) vì Vision API tốn thời gian xử lý nhiều ảnh
 builder.Services.AddHttpClient<QuizApi.Services.GroqService>(client =>
 {
     client.Timeout = TimeSpan.FromMinutes(5);
@@ -115,14 +109,13 @@ builder.Services.AddScoped<QuizApi.Services.GroqService>();
 builder.Services.AddScoped<QuizApi.Services.FileParserService>();
 builder.Services.AddSingleton<QuizApi.Services.CloudinaryService>();
 
-// Cho phép upload file tối đa 20MB
 builder.Services.Configure<FormOptions>(options =>
 {
-    options.MultipartBodyLengthLimit = 20 * 1024 * 1024; // 20 MB
+    options.MultipartBodyLengthLimit = 20 * 1024 * 1024;
 });
 builder.WebHost.ConfigureKestrel(options =>
 {
-    options.Limits.MaxRequestBodySize = 20 * 1024 * 1024; // 20 MB
+    options.Limits.MaxRequestBodySize = 20 * 1024 * 1024;
 });
 
 var app = builder.Build();
@@ -143,7 +136,6 @@ app.UseCors("QuizChatPolicy");
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Đảm bảo không bị chặn Iframe
 app.Use(async (context, next) =>
 {
     context.Response.Headers.Remove("X-Frame-Options");
@@ -151,8 +143,6 @@ app.Use(async (context, next) =>
     await next();
 });
 
-// Phục vụ file tĩnh (ảnh câu hỏi) từ wwwroot/
-// Frontend truy cập qua: http://localhost:PORT/uploads/question-images/xxx.jpg
 app.UseStaticFiles();
 
 app.MapControllers();

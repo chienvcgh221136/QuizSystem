@@ -80,7 +80,6 @@ namespace QuizApi.Controllers
                 if (result == null)
                     return NotFound(new { message = "Không tìm thấy bài thi đang làm." });
 
-                // 1. Lấy danh sách ID các câu hỏi thực sự thuộc về đề thi này
                 var examQuestions = await _context.ExamQuestions
                     .Where(eq => eq.ExamId == result.ExamId)
                     .Select(eq => eq.QuestionId)
@@ -89,12 +88,11 @@ namespace QuizApi.Controllers
                 double totalScore = 0;
                 var userAnswers = new List<UserAnswer>();
 
-                // 2. Chỉ xử lý các câu trả lời nằm trong danh sách câu hỏi của đề
                 foreach (var questionId in examQuestions)
                 {
                     var answer = request.Answers.FirstOrDefault(a => a.QuestionId == questionId);
                     var question = await _context.QuestionBank.FindAsync(questionId);
-                    
+
                     if (question == null) continue;
 
                     bool isCorrect = false;
@@ -161,7 +159,6 @@ namespace QuizApi.Controllers
 
                 var exam = await _context.Exams.FindAsync(result.ExamId);
 
-
                 var answers = await (from ua in _context.UserAnswers
                                      join q in _context.QuestionBank on ua.QuestionId equals q.QuestionId
                                      where ua.ResultId == resultId
@@ -207,7 +204,6 @@ namespace QuizApi.Controllers
             }
         }
 
-    
         [HttpGet("my-history")]
         public async Task<IActionResult> GetMyHistory()
         {
@@ -235,7 +231,6 @@ namespace QuizApi.Controllers
             return Ok(history);
         }
     }
-
 
     public class StartExamRequest
     {

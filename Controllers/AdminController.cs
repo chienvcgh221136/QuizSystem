@@ -26,7 +26,7 @@ namespace QuizApi.Controllers
             var totalUsers = await _context.Users.CountAsync();
             var totalExams = await _context.Exams.Where(e => e.Status == "Published").CountAsync();
             var totalQuestions = await _context.QuestionBank.CountAsync();
-            
+
             var allResults = await _context.ExamResults
                 .Where(r => r.Status == "Submitted" && r.Score != null)
                 .ToListAsync();
@@ -34,10 +34,10 @@ namespace QuizApi.Controllers
             double avgScore = 0;
             if (allResults.Any())
             {
-                // Tính % trung bình: (Score / MaxScore) * 100
+
                 var examIds = allResults.Select(r => r.ExamId).Distinct().ToList();
                 var exams = await _context.Exams.Where(e => examIds.Contains(e.ExamId)).ToDictionaryAsync(e => e.ExamId, e => e.TotalScore);
-                
+
                 avgScore = allResults.Average(r => {
                     var max = (exams.ContainsKey(r.ExamId) ? exams[r.ExamId] : 10) ?? 10.0;
                     if (max == 0) max = 10.0;
@@ -64,8 +64,8 @@ namespace QuizApi.Controllers
                                   select new
                                   {
                                       UserName = u.FullName ?? u.Username ?? "Unknown",
-                                      Initials = (u.FullName ?? u.Username ?? "U").Length > 0 
-                                          ? (u.FullName ?? u.Username ?? "U").Substring(0, 1).ToUpper() 
+                                      Initials = (u.FullName ?? u.Username ?? "U").Length > 0
+                                          ? (u.FullName ?? u.Username ?? "U").Substring(0, 1).ToUpper()
                                           : "U",
                                       ExamTitle = e.Title,
                                       Status = r.Status,

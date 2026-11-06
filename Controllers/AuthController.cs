@@ -29,9 +29,9 @@ namespace QuizApi.Controllers
         {
             try
             {
-                // Tìm user theo Username trước
+
                 var user = await _context.Users.FirstOrDefaultAsync(u => u.Username == request.Username);
-                
+
                 if (user == null)
                 {
                     Console.WriteLine($"[Login] Thất bại: Không tìm thấy Username '{request.Username}'");
@@ -43,24 +43,22 @@ namespace QuizApi.Controllers
                 Console.WriteLine($"[Login] Mật khẩu khớp: {isPasswordMatch}");
                 Console.WriteLine($"[Login] Trạng thái Active: {user.IsActive}");
 
-                // Kiểm tra mật khẩu và tài khoản đang hoạt động
                 if (!isPasswordMatch || user.IsActive == false)
                 {
                     return Unauthorized(new { message = "Sai tài khoản, mật khẩu hoặc tài khoản đã bị khóa." });
                 }
 
-                // Tạo Token
                 var tokenHandler = new JwtSecurityTokenHandler();
                 var secretKey = Environment.GetEnvironmentVariable("JWT_SECRET_KEY") ?? _configuration["JwtSettings:SecretKey"]!;
                 var key = Encoding.ASCII.GetBytes(secretKey);
-                
+
                 var tokenDescriptor = new SecurityTokenDescriptor
                 {
                     Subject = new ClaimsIdentity(new[]
                     {
                         new Claim(ClaimTypes.NameIdentifier, user.UserId.ToString()),
                         new Claim(ClaimTypes.Name, user.Username!),
-                        new Claim(ClaimTypes.Role, user.Role ?? "User") // Cấp role từ Database
+                        new Claim(ClaimTypes.Role, user.Role ?? "User")
                     }),
                     Expires = DateTime.UtcNow.AddMinutes(Convert.ToDouble(Environment.GetEnvironmentVariable("JWT_EXPIRATION") ?? _configuration["JwtSettings:ExpirationInMinutes"] ?? "60")),
                     Issuer = Environment.GetEnvironmentVariable("JWT_ISSUER") ?? _configuration["JwtSettings:Issuer"],

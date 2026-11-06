@@ -12,6 +12,6 @@ namespace QuizApi.Models
         public DateTime? StartTime { get; set; }
         public DateTime? SubmitTime { get; set; }
         public double? Score { get; set; }
-        public string? Status { get; set; } // InProgress, Submitted, Expired
+        public string? Status { get; set; }
     }
 }

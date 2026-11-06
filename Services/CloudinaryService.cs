@@ -3,9 +3,6 @@ using CloudinaryDotNet.Actions;
 
 namespace QuizApi.Services;
 
-/// <summary>
-/// Upload ảnh lên Cloudinary và trả về URL public.
-/// </summary>
 public class CloudinaryService
 {
     private readonly Cloudinary _cloudinary;
@@ -20,12 +17,6 @@ public class CloudinaryService
         _cloudinary = new Cloudinary(account) { Api = { Secure = true } };
     }
 
-    /// <summary>
-    /// Upload byte[] ảnh lên Cloudinary, trả về URL CDN (https://).
-    /// </summary>
-    /// <param name="imageBytes">Dữ liệu ảnh (PNG/JPG...)</param>
-    /// <param name="folder">Thư mục lưu trên Cloudinary, ví dụ "question-images"</param>
-    /// <param name="publicId">ID của file (không có extension). Nếu null thì Cloudinary tự tạo.</param>
     public async Task<string> UploadImageAsync(byte[] imageBytes, string folder = "question-images", string? publicId = null)
     {
         using var stream = new MemoryStream(imageBytes);
@@ -35,7 +26,7 @@ public class CloudinaryService
             Folder     = folder,
             PublicId   = publicId,
             Overwrite  = false,
-            // Tối ưu tự động
+
             Transformation = new Transformation().Quality("auto").FetchFormat("auto")
         };
 
@@ -47,9 +38,6 @@ public class CloudinaryService
         return result.SecureUrl.ToString();
     }
 
-    /// <summary>
-    /// Upload từ base64 string trực tiếp.
-    /// </summary>
     public async Task<string> UploadBase64Async(string base64Image, string folder = "question-images", string? publicId = null)
     {
         var bytes = Convert.FromBase64String(base64Image);

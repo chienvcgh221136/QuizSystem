@@ -69,7 +69,7 @@ namespace QuizApi.Controllers
             string rawPassWord= string.IsNullOrEmpty(user.PasswordHash) ? "123456" : user.PasswordHash;
             user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(rawPassWord);
             user.IsActive ??= true;
-            
+
             user.CreatedAt = System.DateTime.Now;
             try
             {
@@ -129,9 +129,9 @@ namespace QuizApi.Controllers
         {
             var history = await _context.ExamResults
                 .Where(r => r.UserId == id && r.Status == "Submitted")
-                .Join(_context.Exams, 
-                    r => r.ExamId, 
-                    e => e.ExamId, 
+                .Join(_context.Exams,
+                    r => r.ExamId,
+                    e => e.ExamId,
                     (r, e) => new {
                         r.ResultId,
                         e.Title,

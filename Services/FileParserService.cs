@@ -13,19 +13,12 @@ using UglyToad.PdfPig.Content;
 
 namespace QuizApi.Services
 {
-    // ─── Model trung gian: kết quả phân tích tài liệu kèm vị trí ảnh ─────────
+
     public class DocumentWithImages
     {
-        /// <summary>
-        /// Văn bản đầy đủ của tài liệu, với placeholder [IMG_1], [IMG_2],...
-        /// được chèn đúng vị trí mà ảnh xuất hiện trong tài liệu gốc.
-        /// </summary>
+
         public string Text { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Danh sách ảnh trích xuất từ tài liệu.
-        /// Key = tên placeholder (e.g. "IMG_1"), Value = JPEG Base64 thuần của ảnh đó.
-        /// </summary>
         public Dictionary<string, string> Images { get; set; } = new();
     }
 
@@ -33,18 +26,11 @@ namespace QuizApi.Services
     {
         private const int MaxTextLength = 40000;
 
-        // ─── Cài đặt Vision (render toàn trang) ──────────────────────────────
         private const int RenderDpi = 150;
         private const int JpegQuality = 75;
         private const int MaxImageWidth = 1400;
 
-        // ─── Cài đặt lưu ảnh ─────────────────────────────────────────────────
-        // Kích thước ảnh tối thiểu để lọc bỏ icon/ảnh trang trí nhỏ (pixels)
         private const int MinImageDimension = 80;
-
-        // ═══════════════════════════════════════════════════════════════════════
-        //  NHÓM 1: TEXT-ONLY (backward compatible với ChatbotController)
-        // ═══════════════════════════════════════════════════════════════════════
 
         public Task<string> ExtractTextFromPdfAsync(Stream stream)
         {
@@ -102,10 +88,6 @@ namespace QuizApi.Services
             return Task.FromResult(text);
         }
 
-        // ═══════════════════════════════════════════════════════════════════════
-        //  NHÓM 2: VISION / RENDER TOÀN TRANG (cho parse-vision endpoint)
-        // ═══════════════════════════════════════════════════════════════════════
-
         public async Task<ParsedDocument> ExtractFromPdfAsync(Stream stream)
         {
             var result = new ParsedDocument();
@@ -158,15 +140,6 @@ namespace QuizApi.Services
             return Task.FromResult(result);
         }
 
-        // ═══════════════════════════════════════════════════════════════════════
-        //  NHÓM 3: SMART PARSE — Trích xuất TEXT + ẢNH RIÊNG LẺ kèm vị trí
-        //  Dùng cho endpoint parse-vision-smart (lưu ảnh vào disk, gắn ImageUrl)
-        // ═══════════════════════════════════════════════════════════════════════
-
-        /// <summary>
-        /// Phân tích PDF: trích xuất text có chèn placeholder [IMG_X] đúng vị trí,
-        /// đồng thời trích xuất byte array của từng ảnh embedded trong PDF.
-        /// </summary>
         public async Task<DocumentWithImages> ExtractTextAndImagesFromPdfAsync(Stream stream)
         {
             var result = new DocumentWithImages();
@@ -182,10 +155,9 @@ namespace QuizApi.Services
                 using var document = PdfDocument.Open(ms);
                 foreach (var page in document.GetPages())
                 {
-                    // Chèn text của trang
+
                     var pageText = page.Text?.Trim() ?? string.Empty;
 
-                    // Lấy tất cả ảnh embedded trong trang này
                     var pageImages = new List<(double x, double y, byte[] bytes, string ext)>();
                     foreach (var img in page.GetImages())
                     {
@@ -206,27 +178,23 @@ namespace QuizApi.Services
 
                             if (rawBytes == null || rawBytes.Length < 100) continue;
 
-                            // Lọc ảnh quá nhỏ (icon, trang trí)
                             if (img.Bounds.Width < MinImageDimension || img.Bounds.Height < MinImageDimension)
                                 continue;
 
                             pageImages.Add((img.Bounds.Left, img.Bounds.Bottom, rawBytes, ext));
                         }
-                        catch { /* bỏ qua ảnh lỗi */ }
+                        catch {  }
                     }
 
-                    // Gộp text + placeholder ảnh theo thứ tự xuất hiện trên trang
-                    // (PDF tọa độ Y tăng từ dưới lên, nên dùng Bottom để so sánh)
                     if (pageImages.Count == 0)
                     {
                         sb.AppendLine(pageText);
                     }
                     else
                     {
-                        // Sắp xếp ảnh theo vị trí Y (từ trên xuống dưới trên trang)
+
                         pageImages.Sort((a, b) => b.y.CompareTo(a.y));
 
-                        // Chèn text và placeholder xen kẽ
                         sb.AppendLine(pageText);
                         foreach (var (x, y, bytes, ext) in pageImages)
                         {
@@ -234,7 +202,6 @@ namespace QuizApi.Services
                             var key = $"IMG_{imgIndex}";
                             sb.AppendLine($"[{key}]");
 
-                            // Chuyển bytes → JPEG Base64
                             var base64 = ConvertImageBytesToJpegBase64(bytes, ext);
                             if (!string.IsNullOrEmpty(base64))
                                 result.Images[key] = base64;
@@ -253,10 +220,6 @@ namespace QuizApi.Services
             return result;
         }
 
-        /// <summary>
-        /// Phân tích Word (.docx): đọc từng đoạn văn và phần tử inline (text + ảnh),
-        /// chèn placeholder [IMG_X] đúng vị trí ảnh xuất hiện trong document.
-        /// </summary>
         public Task<DocumentWithImages> ExtractTextAndImagesFromDocxAsync(Stream stream)
         {
             var result = new DocumentWithImages();
@@ -273,17 +236,15 @@ namespace QuizApi.Services
                 var body = wordDoc.MainDocumentPart?.Document?.Body;
                 if (body == null) return Task.FromResult(result);
 
-                // Duyệt từng phần tử con trực tiếp của body (Paragraph hoặc Table)
                 foreach (var element in body.ChildElements)
                 {
                     if (element is DocumentFormat.OpenXml.Wordprocessing.Paragraph para)
                     {
                         bool hasImage = false;
 
-                        // Kiểm tra paragraph có chứa ảnh không
                         foreach (var drawing in para.Descendants<DocumentFormat.OpenXml.Wordprocessing.Drawing>())
                         {
-                            // Lấy relationship ID của ảnh
+
                             var blip = drawing.Descendants<DocumentFormat.OpenXml.Drawing.Blip>().FirstOrDefault();
                             if (blip?.Embed?.Value == null) continue;
 
@@ -302,7 +263,7 @@ namespace QuizApi.Services
                                     imgIndex++;
                                     var key = $"IMG_{imgIndex}";
 
-                                    var contentType = imagePart.ContentType; // e.g. "image/png"
+                                    var contentType = imagePart.ContentType;
                                     var ext = contentType.Contains("png") ? "png" : "jpg";
 
                                     var base64 = ConvertImageBytesToJpegBase64(bytes, ext);
@@ -313,11 +274,10 @@ namespace QuizApi.Services
                                         hasImage = true;
                                     }
                                 }
-                                catch { /* bỏ qua ảnh lỗi */ }
+                                catch {  }
                             }
                         }
 
-                        // Thêm text của paragraph (nếu có)
                         if (!hasImage)
                         {
                             var paraText = para.InnerText;
@@ -327,7 +287,7 @@ namespace QuizApi.Services
                     }
                     else if (element is DocumentFormat.OpenXml.Wordprocessing.Table table)
                     {
-                        // Bảng: đọc text từng ô
+
                         foreach (var row in table.Descendants<DocumentFormat.OpenXml.Wordprocessing.TableRow>())
                         {
                             var cells = new List<string>();
@@ -350,8 +310,6 @@ namespace QuizApi.Services
             return Task.FromResult(result);
         }
 
-        // ─── Helpers ──────────────────────────────────────────────────────────
-
         private static string BitmapToJpegBase64(SKBitmap bitmap)
         {
             SKBitmap? scaled = null;
@@ -372,10 +330,6 @@ namespace QuizApi.Services
             finally { scaled?.Dispose(); }
         }
 
-        /// <summary>
-        /// Chuyển raw bytes ảnh (PNG hoặc JPEG) thành JPEG Base64 thuần.
-        /// Dùng SkiaSharp để decode → re-encode JPEG, đảm bảo định dạng nhất quán.
-        /// </summary>
         private static string ConvertImageBytesToJpegBase64(byte[] bytes, string ext)
         {
             try
@@ -384,7 +338,6 @@ namespace QuizApi.Services
                 using var bitmap = SKBitmap.Decode(ms);
                 if (bitmap == null) return string.Empty;
 
-                // Lọc ảnh quá nhỏ sau khi decode
                 if (bitmap.Width < MinImageDimension || bitmap.Height < MinImageDimension)
                     return string.Empty;
 

@@ -9,7 +9,7 @@ namespace QuizApi.Models
         public int AnswerId { get; set; }
         public int ResultId { get; set; }
         public int QuestionId { get; set; }
-        public string? SelectedOption { get; set; } // A, B, C, D
+        public string? SelectedOption { get; set; }
         public bool? IsCorrect { get; set; }
         public DateTime? AnsweredAt { get; set; }
     }

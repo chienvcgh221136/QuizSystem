@@ -33,7 +33,6 @@ namespace QuizApi.Controllers
                     .AsNoTracking()
                     .ToListAsync();
 
-                // Normalize certain category names for UI consistency
                 var categoryMap = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
                 {
                     { "Math", "Toán" }
@@ -74,7 +73,6 @@ namespace QuizApi.Controllers
                     .Distinct()
                     .ToListAsync();
 
-                // Normalize known category names
                 var categoryMap = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
                 {
                     { "Math", "Toán" }
@@ -172,7 +170,7 @@ namespace QuizApi.Controllers
                 existingQuestion.Explanation = updatedQuestion.Explanation;
                 existingQuestion.ScorePerQuestion = updatedQuestion.ScorePerQuestion;
                 existingQuestion.IsActive = updatedQuestion.IsActive;
-                // Chỉ cập nhật ImageUrl nếu được truyền lên (null = giữ nguyên, "" = xóa ảnh)
+
                 if (updatedQuestion.ImageUrl != null)
                     existingQuestion.ImageUrl = string.IsNullOrEmpty(updatedQuestion.ImageUrl) ? null : updatedQuestion.ImageUrl;
 
@@ -242,7 +240,6 @@ namespace QuizApi.Controllers
                 {
                     var worksheet = workbook.Worksheets.Add("Ngân hàng câu hỏi");
 
-                    // Headers
                     worksheet.Cell(1, 1).Value = "Câu hỏi";
                     worksheet.Cell(1, 2).Value = "Câu chọn";
                     worksheet.Cell(1, 3).Value = "Đáp án";
@@ -258,14 +255,13 @@ namespace QuizApi.Controllers
                     foreach (var q in questions)
                     {
                         worksheet.Cell(row, 1).Value = q.Content;
-                        
-                        // Option format: 1 column, multiple lines
+
                         var options = new List<string>();
                         if (!string.IsNullOrEmpty(q.OptionA)) options.Add($"A. {q.OptionA}");
                         if (!string.IsNullOrEmpty(q.OptionB)) options.Add($"B. {q.OptionB}");
                         if (!string.IsNullOrEmpty(q.OptionC)) options.Add($"C. {q.OptionC}");
                         if (!string.IsNullOrEmpty(q.OptionD)) options.Add($"D. {q.OptionD}");
-                        
+
                         worksheet.Cell(row, 2).Value = string.Join(Environment.NewLine, options);
                         worksheet.Cell(row, 3).Value = q.CorrectOption;
                         worksheet.Cell(row, 4).Value = q.Explanation;
@@ -276,14 +272,14 @@ namespace QuizApi.Controllers
                             {
                                 var relPath = q.ImageUrl.StartsWith("/") ? q.ImageUrl.Substring(1) : q.ImageUrl;
                                 var imgPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", relPath.Replace("/", "\\"));
-                                
+
                                 if (System.IO.File.Exists(imgPath))
                                 {
                                     var pic = worksheet.AddPicture(imgPath)
                                         .MoveTo(worksheet.Cell(row, 5))
                                         .WithSize(100, 100);
-                                    
-                                    worksheet.Row(row).Height = 80; // Make row tall enough
+
+                                    worksheet.Row(row).Height = 80;
                                 }
                                 else
                                 {
@@ -296,9 +292,8 @@ namespace QuizApi.Controllers
                             }
                         }
 
-                        // Enable text wrapping
                         worksheet.Row(row).Style.Alignment.WrapText = true;
-                        
+
                         row++;
                     }
 
